@@ -2,3 +2,10 @@
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+
+# Added by cargo
+/target
+
+# Secrets
+.env
