@@ -81,8 +81,41 @@ bd close bd-42 --reason "Completed" --json
 - `bug` - Something broken
 - `feature` - New functionality
 - `task` - Work item (tests, docs, refactoring)
-- `epic` - Large feature with subtasks
+- `epic` - Large feature with subtasks (create this first, then child tasks under it)
 - `chore` - Maintenance (dependencies, tooling)
+
+### Epic / Child Hierarchy
+
+**Always create an epic before child tasks for any multi-task feature:**
+
+```bash
+# 1. Create the epic
+bd create "Feature name" -t epic -p 0 --description="..." --json
+# → returns epic id, e.g. bd-i9w
+
+# 2. Create child tasks with --parent
+bd create "Subtask" -t task -p 1 --parent bd-i9w --description="..." --json
+
+# 3. Reparent existing tasks if epic was created after
+bd update bd-abc --parent bd-i9w --json
+```
+
+### Dependency Types
+
+Use typed prefixes with `--deps` to express relationships:
+
+```bash
+# Blocking: this issue cannot start until bd-123 is done
+bd create "Task B" --deps "bd-123" --json                    # plain id = "depends on"
+
+# Discovered during work on another issue
+bd create "Found bug" --deps "discovered-from:bd-123" --json
+
+# Multiple deps, mixed types
+bd create "Task" --deps "bd-123,discovered-from:bd-456" --json
+```
+
+`bd show <id>` displays `DEPENDS ON` (blockers) and `BLOCKS` (what this unlocks) — verify the graph looks correct after creating issues.
 
 ### Priorities
 
@@ -114,6 +147,8 @@ bd automatically syncs with git:
 - ✅ Use bd for ALL task tracking
 - ✅ Always use `--json` flag for programmatic use
 - ✅ Link discovered work with `discovered-from` dependencies
+- ✅ Create an **epic first** for any multi-task feature, then add children with `--parent`
+- ✅ Use typed dep prefixes (`discovered-from:`, plain id for blocking) — verify with `bd show`
 - ✅ Check `bd ready` before asking "what should I work on?"
 - ❌ Do NOT create markdown TODO lists
 - ❌ Do NOT use external issue trackers
