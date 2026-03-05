@@ -3,7 +3,6 @@
 
 use anyhow::Result;
 use bitcoin::psbt::Psbt;
-use std::str::FromStr;
 
 pub fn decode_psbt(hex: &str) -> Result<Psbt> {
     let bytes = hex::decode(hex).map_err(|e| anyhow::anyhow!("invalid hex: {}", e))?;

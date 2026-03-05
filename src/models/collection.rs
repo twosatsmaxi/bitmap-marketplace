@@ -15,7 +15,7 @@ pub struct Collection {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CollectionStats {
     pub collection_id: Uuid,
     pub floor_price_sats: Option<i64>,

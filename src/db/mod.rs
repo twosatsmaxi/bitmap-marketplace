@@ -1,6 +1,13 @@
 use anyhow::Result;
 use sqlx::PgPool;
 
+pub mod collections;
+pub mod inscriptions;
+pub mod listings;
+pub mod offers;
+pub mod sales;
+pub mod activity;
+
 #[derive(Clone)]
 pub struct Database {
     pub pool: PgPool,
