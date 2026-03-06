@@ -66,4 +66,15 @@ impl Database {
         .await?;
         Ok(())
     }
+
+    pub async fn update_listing_psbt(&self, id: Uuid, psbt: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE listings SET psbt = $1, updated_at = NOW() WHERE id = $2"
+        )
+        .bind(psbt)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }

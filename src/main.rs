@@ -34,6 +34,28 @@ async fn main() -> Result<()> {
     let db = Database::new().await?;
     db.run_migrations().await?;
 
+    // Spawn background services
+    {
+        let db_clone = db.clone();
+        tokio::spawn(async move {
+            if let Ok(watcher) = crate::services::mempool_watcher::MempoolWatcher::new(db_clone) {
+                if let Err(e) = watcher.run().await {
+                    tracing::error!("Mempool watcher error: {}", e);
+                }
+            }
+        });
+    }
+    {
+        let db_clone = db.clone();
+        tokio::spawn(async move {
+            if let Ok(indexer) = crate::services::indexer::InscriptionIndexer::new(db_clone) {
+                if let Err(e) = indexer.run().await {
+                    tracing::error!("Indexer error: {}", e);
+                }
+            }
+        });
+    }
+
     let ws_broadcaster = std::sync::Arc::new(ws::WsBroadcaster::new());
 
     let state = AppState { db, ws_broadcaster: ws_broadcaster.clone() };

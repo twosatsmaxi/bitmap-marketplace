@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State, Query},
-    routing::{get, post, delete},
+    routing::{get, post},
     Json, Router,
 };
 use crate::{
@@ -17,6 +17,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_listings).post(create_listing))
         .route("/:id", get(get_listing).delete(cancel_listing))
+        .route("/:id/confirm", post(confirm_listing))
 }
 
 #[derive(Deserialize)]
@@ -96,9 +97,9 @@ async fn cancel_listing(
 ) -> AppResult<Json<serde_json::Value>> {
     let listing = state.db.get_listing(id).await.map_err(AppError::Internal)?;
     let listing = listing.ok_or_else(|| AppError::NotFound("Listing not found".to_string()))?;
-    
+
     state.db.update_listing_status(id, ListingStatus::Cancelled).await.map_err(AppError::Internal)?;
-    
+
     // Insert Activity
     let activity = Activity {
         id: Uuid::new_v4(),
@@ -115,4 +116,28 @@ async fn cancel_listing(
     let _ = state.db.create_activity(&activity).await;
 
     Ok(Json(serde_json::json!({ "status": "cancelled" })))
+}
+
+#[derive(Deserialize)]
+struct ConfirmListingRequest {
+    signed_psbt: String,
+}
+
+async fn confirm_listing(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ConfirmListingRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    // Ensure the listing exists
+    let listing = state.db.get_listing(id).await.map_err(AppError::Internal)?;
+    let _ = listing.ok_or_else(|| AppError::NotFound("Listing not found".to_string()))?;
+
+    // Store the buyer-signed PSBT on the listing row
+    state.db.update_listing_psbt(id, &req.signed_psbt).await.map_err(AppError::Internal)?;
+
+    // PSBT broadcast service not yet complete; mark as pending_broadcast
+    Ok(Json(serde_json::json!({
+        "listing_id": id,
+        "status": "pending_broadcast"
+    })))
 }
