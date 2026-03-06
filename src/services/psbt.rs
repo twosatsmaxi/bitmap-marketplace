@@ -289,3 +289,7 @@ pub fn decode_psbt(hex: &str) -> Result<Psbt> {
 pub fn encode_psbt(psbt: &Psbt) -> String {
     hex::encode(psbt.serialize())
 }
+
+#[cfg(test)]
+#[path = "psbt_tests.rs"]
+mod psbt_tests;

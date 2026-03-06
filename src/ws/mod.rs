@@ -193,3 +193,129 @@ pub fn router(broadcaster: Arc<WsBroadcaster>) -> Router<AppState> {
     let _ = broadcaster; // already on AppState; suppress unused-variable lint
     Router::new().route("/ws", get(ws_handler))
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Serialization tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ws_event_new_listing_serializes() {
+        let event = WsEvent::NewListing {
+            inscription_id: "abc123i0".to_string(),
+            price_sats: 50_000,
+            seller: "bc1qseller".to_string(),
+        };
+        let json = serde_json::to_string(&event).expect("serialization failed");
+        assert!(json.contains("\"type\":\"new_listing\""), "missing type field: {json}");
+        assert!(json.contains("\"inscription_id\":\"abc123i0\""), "missing inscription_id: {json}");
+        assert!(json.contains("\"price_sats\":50000"), "missing price_sats: {json}");
+        assert!(json.contains("\"seller\":\"bc1qseller\""), "missing seller: {json}");
+    }
+
+    #[test]
+    fn ws_event_sale_confirmed_serializes() {
+        let event = WsEvent::SaleConfirmed {
+            inscription_id: "def456i0".to_string(),
+            price_sats: 100_000,
+            buyer: "bc1qbuyer".to_string(),
+            tx_id: "deadbeeftx".to_string(),
+        };
+        let json = serde_json::to_string(&event).expect("serialization failed");
+        assert!(json.contains("\"type\":\"sale_confirmed\""), "missing type field: {json}");
+        assert!(json.contains("\"inscription_id\":\"def456i0\""), "missing inscription_id: {json}");
+        assert!(json.contains("\"price_sats\":100000"), "missing price_sats: {json}");
+        assert!(json.contains("\"buyer\":\"bc1qbuyer\""), "missing buyer: {json}");
+        assert!(json.contains("\"tx_id\":\"deadbeeftx\""), "missing tx_id: {json}");
+    }
+
+    #[test]
+    fn ws_event_offer_received_serializes() {
+        let event = WsEvent::OfferReceived {
+            inscription_id: "ghi789i0".to_string(),
+            price_sats: 75_000,
+            buyer: "bc1qofferer".to_string(),
+        };
+        let json = serde_json::to_string(&event).expect("serialization failed");
+        assert!(json.contains("\"type\":\"offer_received\""), "missing type field: {json}");
+        assert!(json.contains("\"inscription_id\":\"ghi789i0\""), "missing inscription_id: {json}");
+        assert!(json.contains("\"price_sats\":75000"), "missing price_sats: {json}");
+        assert!(json.contains("\"buyer\":\"bc1qofferer\""), "missing buyer: {json}");
+    }
+
+    // -----------------------------------------------------------------------
+    // event_matches tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn event_matches_by_inscription_id() {
+        let event = WsEvent::NewListing {
+            inscription_id: "match_me_i0".to_string(),
+            price_sats: 1_000,
+            seller: "bc1qseller".to_string(),
+        };
+
+        // Filter that matches the inscription_id exactly.
+        let filter = Some(WsSubscribe {
+            inscription_id: Some("match_me_i0".to_string()),
+            collection_id: None,
+        });
+        assert!(event_matches(&event, &filter), "expected match on inscription_id");
+
+        // Filter with a different inscription_id — should NOT match.
+        let non_matching_filter = Some(WsSubscribe {
+            inscription_id: Some("other_id_i0".to_string()),
+            collection_id: None,
+        });
+        assert!(!event_matches(&event, &non_matching_filter), "expected no match for different inscription_id");
+    }
+
+    #[test]
+    fn event_matches_no_filter() {
+        let event = WsEvent::SaleConfirmed {
+            inscription_id: "any_id_i0".to_string(),
+            price_sats: 5_000,
+            buyer: "bc1qbuyer".to_string(),
+            tx_id: "tx123".to_string(),
+        };
+
+        // No filter at all — should always match.
+        assert!(event_matches(&event, &None), "expected match when filter is None");
+    }
+
+    // -----------------------------------------------------------------------
+    // WsBroadcaster send / receive test
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn broadcaster_send_receive() {
+        let broadcaster = WsBroadcaster::new();
+
+        // Subscribe before sending so we don't miss the message.
+        let mut rx = broadcaster.subscribe();
+
+        let event = WsEvent::OfferReceived {
+            inscription_id: "bcast_test_i0".to_string(),
+            price_sats: 42_000,
+            buyer: "bc1qbcastbuyer".to_string(),
+        };
+
+        broadcaster.send(event.clone());
+
+        let received = rx.recv().await.expect("failed to receive event");
+
+        // Verify the received event matches what was sent by round-tripping
+        // through JSON (WsEvent doesn't implement PartialEq, but Serialize
+        // gives us a reliable structural comparison).
+        let sent_json = serde_json::to_string(&event).unwrap();
+        let recv_json = serde_json::to_string(&received).unwrap();
+        assert_eq!(sent_json, recv_json, "received event differs from sent event");
+    }
+}
