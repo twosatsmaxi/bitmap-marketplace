@@ -219,10 +219,14 @@ impl Default for OrdClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize env-var tests to avoid race conditions between parallel test threads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_ord_client_default_url() {
-        // Remove any environment variable that might be set in the test runner.
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("ORD_URL");
         let client = OrdClient::new();
         assert_eq!(client.base_url, "http://127.0.0.1:80");
@@ -230,6 +234,7 @@ mod tests {
 
     #[test]
     fn test_ord_client_custom_url() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ORD_URL", "http://ord.example.com:8080");
         let client = OrdClient::new();
         assert_eq!(client.base_url, "http://ord.example.com:8080");
