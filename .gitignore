@@ -9,3 +9,4 @@
 
 # Secrets
 .env
+.claude/worktrees
