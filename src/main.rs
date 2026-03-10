@@ -28,6 +28,7 @@ pub struct AppState {
     pub db: Database,
     pub ws_broadcaster: Arc<ws::WsBroadcaster>,
     pub marketplace_keypair: Arc<MarketplaceKeypair>,
+    pub http_client: reqwest::Client,
 }
 
 #[tokio::main]
@@ -71,7 +72,12 @@ async fn main() -> Result<()> {
     let marketplace_keypair = MarketplaceKeypair::from_env()
         .expect("MarketplaceKeypair: failed to load from env (check MARKETPLACE_SECRET_KEY)");
 
-    let state = AppState { db, ws_broadcaster: ws_broadcaster.clone(), marketplace_keypair };
+    let state = AppState {
+        db,
+        ws_broadcaster: ws_broadcaster.clone(),
+        marketplace_keypair,
+        http_client: reqwest::Client::new(),
+    };
 
     // Per-IP rate limiting config.
     // Uses PeerIpKeyExtractor (TCP peer address) — correct for direct deployments with no

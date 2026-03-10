@@ -52,7 +52,6 @@ pub struct CreateListingRequest {
     pub gas_txid: Option<String>,
     pub gas_vout: Option<u32>,
     pub gas_amount_sats: Option<u64>,
-    pub source_marketplace: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -102,7 +102,7 @@ async fn create_listing(
         multisig_script,
         locking_raw_tx: None, // set after seller signs and calls /submit-locking
         protection_status,
-        source_marketplace: req.source_marketplace.clone(),
+        source_marketplace: None,
     };
 
     let created = state.db.create_listing(&listing).await.map_err(AppError::Internal)?;
@@ -262,7 +262,7 @@ async fn import_listings(
     State(state): State<AppState>,
     Json(req): Json<ImportListingsRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let me_listings = magic_eden::fetch_listings_by_seller(&req.seller_address)
+    let me_listings = magic_eden::fetch_listings_by_seller(&state.http_client, &req.seller_address)
         .await
         .map_err(AppError::Internal)?;
 
@@ -270,6 +270,7 @@ async fn import_listings(
     let mut skipped = 0usize;
     let mut failed = 0usize;
     let mut imported_listings = Vec::new();
+    let now = chrono::Utc::now();
 
     for me in me_listings {
         // Skip if already active on our marketplace
@@ -295,14 +296,14 @@ async fn import_listings(
             psbt: me.signed_psbt,
             royalty_address: None,
             royalty_bps: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: now,
+            updated_at: now,
             seller_pubkey: None,
             multisig_address: None,
             multisig_script: None,
             locking_raw_tx: None,
             protection_status: "none".to_string(),
-            source_marketplace: Some("magic_eden".to_string()),
+            source_marketplace: Some(magic_eden::NAME.to_string()),
         };
 
         match state.db.create_listing(&listing).await {

@@ -1,5 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
+
+pub const NAME: &str = "magic_eden";
 
 pub struct MagicEdenListing {
     pub inscription_id: String,
@@ -25,8 +27,10 @@ struct MeListingsResponse {
     tokens: Option<Vec<MeToken>>,
 }
 
-pub async fn fetch_listings_by_seller(seller_address: &str) -> Result<Vec<MagicEdenListing>> {
-    let client = reqwest::Client::new();
+pub async fn fetch_listings_by_seller(
+    client: &reqwest::Client,
+    seller_address: &str,
+) -> Result<Vec<MagicEdenListing>> {
     let mut all_listings = Vec::new();
     let limit = 100usize;
     let mut offset = 0usize;
@@ -41,14 +45,19 @@ pub async fn fetch_listings_by_seller(seller_address: &str) -> Result<Vec<MagicE
             .get(&url)
             .header("User-Agent", "bitmap-marketplace/1.0")
             .send()
-            .await?;
+            .await
+            .with_context(|| format!("GET {url}: request failed"))?;
 
         if !resp.status().is_success() {
             // Non-200 (e.g. 404 for unknown address) — treat as empty
             break;
         }
 
-        let body: MeListingsResponse = resp.json().await?;
+        let body: MeListingsResponse = resp
+            .json()
+            .await
+            .with_context(|| format!("GET {url}: failed to deserialize JSON response"))?;
+
         let tokens = match body.tokens {
             Some(t) => t,
             None => break,
@@ -57,10 +66,7 @@ pub async fn fetch_listings_by_seller(seller_address: &str) -> Result<Vec<MagicE
         let count = tokens.len();
         for token in tokens {
             // inscription_id may be in `id` or `inscriptionId` depending on API version
-            let inscription_id = token
-                .inscription_id
-                .or(token.id)
-                .unwrap_or_default();
+            let inscription_id = token.inscription_id.or(token.id).unwrap_or_default();
 
             if inscription_id.is_empty() {
                 continue;
