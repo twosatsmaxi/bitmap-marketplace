@@ -9,6 +9,7 @@ use crate::{
     models::listing::{Listing, ListingStatus, CreateListingRequest},
     models::activity::{Activity, ActivityType},
     services::psbt::{build_locking_psbt, decode_psbt, LockingPsbtRequest},
+    services::magic_eden,
     ws::WsEvent,
 };
 use bitcoin::secp256k1::PublicKey;
@@ -19,6 +20,7 @@ use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_listings).post(create_listing))
+        .route("/import", post(import_listings))
         .route("/:id", get(get_listing).delete(cancel_listing))
         .route("/:id/confirm", post(confirm_listing))
         .route("/:id/submit-locking", post(submit_locking))
@@ -100,6 +102,7 @@ async fn create_listing(
         multisig_script,
         locking_raw_tx: None, // set after seller signs and calls /submit-locking
         protection_status,
+        source_marketplace: req.source_marketplace.clone(),
     };
 
     let created = state.db.create_listing(&listing).await.map_err(AppError::Internal)?;
@@ -244,5 +247,85 @@ async fn submit_locking(
         "listing_id": id,
         "protection_status": "active",
         "message": "Locking transaction stored. Listing is now protected and purchasable."
+    })))
+}
+
+#[derive(Deserialize)]
+struct ImportListingsRequest {
+    seller_address: String,
+}
+
+/// POST /import
+/// Fetches active listings from Magic Eden for a given seller address and mirrors them
+/// in our marketplace using the already-signed PSBTs — no re-signing required.
+async fn import_listings(
+    State(state): State<AppState>,
+    Json(req): Json<ImportListingsRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let me_listings = magic_eden::fetch_listings_by_seller(&req.seller_address)
+        .await
+        .map_err(AppError::Internal)?;
+
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    let mut imported_listings = Vec::new();
+
+    for me in me_listings {
+        // Skip if already active on our marketplace
+        match state.db.get_active_listing_by_inscription(&me.inscription_id).await {
+            Ok(Some(_)) => {
+                skipped += 1;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("DB error checking inscription {}: {}", me.inscription_id, e);
+                failed += 1;
+                continue;
+            }
+            Ok(None) => {}
+        }
+
+        let listing = Listing {
+            id: Uuid::new_v4(),
+            inscription_id: me.inscription_id.clone(),
+            seller_address: me.seller_address.clone(),
+            price_sats: me.price_sats,
+            status: ListingStatus::Active,
+            psbt: me.signed_psbt,
+            royalty_address: None,
+            royalty_bps: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            seller_pubkey: None,
+            multisig_address: None,
+            multisig_script: None,
+            locking_raw_tx: None,
+            protection_status: "none".to_string(),
+            source_marketplace: Some("magic_eden".to_string()),
+        };
+
+        match state.db.create_listing(&listing).await {
+            Ok(created) => {
+                state.ws_broadcaster.send(WsEvent::NewListing {
+                    inscription_id: me.inscription_id,
+                    price_sats: me.price_sats as u64,
+                    seller: me.seller_address,
+                });
+                imported_listings.push(serde_json::json!(created));
+                imported += 1;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to insert imported listing {}: {}", me.inscription_id, e);
+                failed += 1;
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "imported": imported,
+        "skipped": skipped,
+        "failed": failed,
+        "listings": imported_listings,
     })))
 }

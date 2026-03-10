@@ -40,8 +40,8 @@ impl Database {
             r#"
             INSERT INTO listings (id, inscription_id, seller_address, price_sats, status, psbt,
                 royalty_address, royalty_bps,
-                seller_pubkey, multisig_address, multisig_script, protection_status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                seller_pubkey, multisig_address, multisig_script, protection_status, source_marketplace)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING *
             "#
         )
@@ -57,6 +57,7 @@ impl Database {
         .bind(&listing.multisig_address)
         .bind(&listing.multisig_script)
         .bind(&listing.protection_status)
+        .bind(&listing.source_marketplace)
         .fetch_one(&self.pool)
         .await?;
         Ok(result)

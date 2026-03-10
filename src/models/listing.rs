@@ -31,6 +31,8 @@ pub struct Listing {
     /// Signed locking raw tx hex — stored but NOT yet broadcast.
     pub locking_raw_tx: Option<String>,
     pub protection_status: String,
+    /// Which marketplace this listing was imported from (e.g. "magic_eden"). NULL = native listing.
+    pub source_marketplace: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +52,7 @@ pub struct CreateListingRequest {
     pub gas_txid: Option<String>,
     pub gas_vout: Option<u32>,
     pub gas_amount_sats: Option<u64>,
+    pub source_marketplace: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
