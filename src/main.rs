@@ -1,6 +1,7 @@
 use anyhow::Result;
 use axum::Router;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -13,11 +14,13 @@ mod services;
 pub mod ws;
 
 use crate::db::Database;
+use crate::services::marketplace_keypair::MarketplaceKeypair;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
-    pub ws_broadcaster: std::sync::Arc<ws::WsBroadcaster>,
+    pub ws_broadcaster: Arc<ws::WsBroadcaster>,
+    pub marketplace_keypair: Arc<MarketplaceKeypair>,
 }
 
 #[tokio::main]
@@ -56,9 +59,12 @@ async fn main() -> Result<()> {
         });
     }
 
-    let ws_broadcaster = std::sync::Arc::new(ws::WsBroadcaster::new());
+    let ws_broadcaster = Arc::new(ws::WsBroadcaster::new());
 
-    let state = AppState { db, ws_broadcaster: ws_broadcaster.clone() };
+    let marketplace_keypair = MarketplaceKeypair::from_env()
+        .expect("MarketplaceKeypair: failed to load from env (check MARKETPLACE_SECRET_KEY)");
+
+    let state = AppState { db, ws_broadcaster: ws_broadcaster.clone(), marketplace_keypair };
 
     let app = Router::new()
         .nest("/api", routes::router())

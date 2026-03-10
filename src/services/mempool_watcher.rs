@@ -72,7 +72,27 @@ impl MempoolWatcher {
                     None => continue,
                 };
 
-                // If get_raw_transaction succeeds, the tx is confirmed (or at least in a block).
+                // For package-broadcast sales, also check the locking tx if present.
+                if let Some(ref locking_tx_id) = sale.locking_tx_id {
+                    match self.rpc.get_raw_transaction(locking_tx_id) {
+                        Err(e) => {
+                            tracing::debug!(
+                                "MempoolWatcher: locking tx {} not yet confirmed: {}",
+                                locking_tx_id,
+                                e
+                            );
+                            // Don't skip — sale tx may still confirm independently.
+                        }
+                        Ok(_) => {
+                            tracing::debug!(
+                                "MempoolWatcher: locking tx {} confirmed",
+                                locking_tx_id
+                            );
+                        }
+                    }
+                }
+
+                // If get_raw_transaction succeeds, the sale tx is confirmed.
                 match self.rpc.get_raw_transaction(&tx_id) {
                     Err(e) => {
                         tracing::debug!(

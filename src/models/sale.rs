@@ -12,6 +12,7 @@ pub struct Sale {
     pub price_sats: i64,
     pub royalty_sats: i64,
     pub tx_id: Option<String>,
+    pub locking_tx_id: Option<String>,
     pub block_height: Option<i64>,
     pub confirmed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

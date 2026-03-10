@@ -5,6 +5,7 @@ use bitcoin::consensus::deserialize;
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use serde_json::json;
 
 pub struct BitcoinRpc {
     client: Client,
@@ -149,5 +150,26 @@ impl BitcoinRpc {
         let info = self.client.get_blockchain_info()?;
         // The bitcoincore-rpc-json crate deserializes `chain` directly into `Network`.
         Ok(info.chain)
+    }
+
+    /// Submit a package of transactions atomically via `submitpackage` RPC (Bitcoin Core v25+).
+    /// `txns` is a slice of raw transaction hex strings; the first should be the parent (locking tx),
+    /// the second the child (sale tx).
+    /// Returns the txids of successfully accepted transactions.
+    pub fn submit_package(&self, txns: &[&str]) -> Result<Vec<String>> {
+        let tx_array: Vec<serde_json::Value> = txns.iter().map(|tx| json!(tx)).collect();
+        let result: serde_json::Value = self
+            .client
+            .call("submitpackage", &[json!(tx_array)])?;
+
+        // submitpackage returns {"tx-results": {txid: {...}}, "replaced-transactions": [...]}
+        // Extract accepted txids from tx-results keys.
+        let txids = result
+            .get("tx-results")
+            .and_then(|r| r.as_object())
+            .map(|m| m.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        Ok(txids)
     }
 }

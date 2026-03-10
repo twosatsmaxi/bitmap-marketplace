@@ -306,3 +306,182 @@ fn decode_invalid_psbt_bytes_returns_error() {
     // Valid hex but not a PSBT.
     assert!(decode_psbt("deadbeef").is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Mempool protection: build_locking_psbt
+// ---------------------------------------------------------------------------
+
+use super::{
+    build_locking_psbt, build_multisig_redeem_script, p2wsh_address, LockingPsbtRequest,
+    MIN_SELF_FUNDED, DEFAULT_LOCKING_TX_FEE_SATS,
+};
+use bitcoin::secp256k1::{Secp256k1, SecretKey};
+use bitcoin::Network;
+
+/// Generate a deterministic secp256k1 keypair from a seed byte.
+fn make_keypair(seed: u8) -> (SecretKey, bitcoin::secp256k1::PublicKey) {
+    let secp = Secp256k1::new();
+    let mut key_bytes = [0u8; 32];
+    key_bytes[31] = seed;
+    let sk = SecretKey::from_slice(&key_bytes).unwrap();
+    let pk = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk);
+    (sk, pk)
+}
+
+fn seller_pk_hex() -> String {
+    let (_, pk) = make_keypair(1);
+    hex::encode(pk.serialize())
+}
+
+fn marketplace_pk_hex() -> String {
+    let (_, pk) = make_keypair(2);
+    hex::encode(pk.serialize())
+}
+
+#[test]
+fn locking_psbt_roundtrip() {
+    let req = LockingPsbtRequest {
+        inscription_txid: FAKE_TXID.to_string(),
+        inscription_vout: 0,
+        inscription_amount_sats: MIN_SELF_FUNDED + 100,
+        seller_pubkey_hex: seller_pk_hex(),
+        marketplace_pubkey_hex: marketplace_pk_hex(),
+        network: Network::Bitcoin,
+        fee_rate_sat_vb: None,
+        gas_txid: None,
+        gas_vout: None,
+        gas_amount_sats: None,
+    };
+    let result = build_locking_psbt(&req).unwrap();
+    let psbt = decode_psbt(&result.psbt_hex).unwrap();
+    let rehex = encode_psbt(&psbt);
+    assert_eq!(result.psbt_hex, rehex);
+}
+
+#[test]
+fn locking_psbt_has_one_input_one_output() {
+    let req = LockingPsbtRequest {
+        inscription_txid: FAKE_TXID.to_string(),
+        inscription_vout: 0,
+        inscription_amount_sats: 1000,
+        seller_pubkey_hex: seller_pk_hex(),
+        marketplace_pubkey_hex: marketplace_pk_hex(),
+        network: Network::Bitcoin,
+        fee_rate_sat_vb: None,
+        gas_txid: None,
+        gas_vout: None,
+        gas_amount_sats: None,
+    };
+    let result = build_locking_psbt(&req).unwrap();
+    let psbt = decode_psbt(&result.psbt_hex).unwrap();
+    assert_eq!(psbt.unsigned_tx.input.len(), 1);
+    assert_eq!(psbt.unsigned_tx.output.len(), 1);
+}
+
+#[test]
+fn locking_psbt_output_is_multisig_address() {
+    let req = LockingPsbtRequest {
+        inscription_txid: FAKE_TXID.to_string(),
+        inscription_vout: 0,
+        inscription_amount_sats: 1000,
+        seller_pubkey_hex: seller_pk_hex(),
+        marketplace_pubkey_hex: marketplace_pk_hex(),
+        network: Network::Bitcoin,
+        fee_rate_sat_vb: None,
+        gas_txid: None,
+        gas_vout: None,
+        gas_amount_sats: None,
+    };
+    let result = build_locking_psbt(&req).unwrap();
+    assert!(!result.multisig_address.is_empty());
+    assert!(!result.multisig_script_hex.is_empty());
+    // Multisig address must be a P2WSH (bech32, starts with bc1q on mainnet, 62 chars).
+    assert!(result.multisig_address.starts_with("bc1q"), "must be P2WSH bech32");
+}
+
+#[test]
+fn locking_psbt_output_value_deducts_fee() {
+    let inscription_amount = 1000u64;
+    let req = LockingPsbtRequest {
+        inscription_txid: FAKE_TXID.to_string(),
+        inscription_vout: 0,
+        inscription_amount_sats: inscription_amount,
+        seller_pubkey_hex: seller_pk_hex(),
+        marketplace_pubkey_hex: marketplace_pk_hex(),
+        network: Network::Bitcoin,
+        fee_rate_sat_vb: None,
+        gas_txid: None,
+        gas_vout: None,
+        gas_amount_sats: None,
+    };
+    let result = build_locking_psbt(&req).unwrap();
+    let psbt = decode_psbt(&result.psbt_hex).unwrap();
+    let out_value = psbt.unsigned_tx.output[0].value.to_sat();
+    assert_eq!(out_value, inscription_amount - DEFAULT_LOCKING_TX_FEE_SATS);
+}
+
+#[test]
+fn locking_psbt_below_min_self_funded_returns_error() {
+    let req = LockingPsbtRequest {
+        inscription_txid: FAKE_TXID.to_string(),
+        inscription_vout: 0,
+        inscription_amount_sats: MIN_SELF_FUNDED - 1, // too small
+        seller_pubkey_hex: seller_pk_hex(),
+        marketplace_pubkey_hex: marketplace_pk_hex(),
+        network: Network::Bitcoin,
+        fee_rate_sat_vb: None,
+        gas_txid: None,
+        gas_vout: None,
+        gas_amount_sats: None,
+    };
+    assert!(build_locking_psbt(&req).is_err());
+}
+
+#[test]
+fn locking_psbt_with_gas_utxo_has_two_inputs() {
+    let req = LockingPsbtRequest {
+        inscription_txid: FAKE_TXID.to_string(),
+        inscription_vout: 0,
+        inscription_amount_sats: 546,
+        seller_pubkey_hex: seller_pk_hex(),
+        marketplace_pubkey_hex: marketplace_pk_hex(),
+        network: Network::Bitcoin,
+        fee_rate_sat_vb: None,
+        gas_txid: Some(FAKE_TXID.to_string()),
+        gas_vout: Some(1),
+        gas_amount_sats: Some(2000),
+    };
+    let result = build_locking_psbt(&req).unwrap();
+    let psbt = decode_psbt(&result.psbt_hex).unwrap();
+    assert_eq!(psbt.unsigned_tx.input.len(), 2, "gas input adds a second input");
+}
+
+#[test]
+fn bip67_sort_is_deterministic() {
+    let (_, pk1) = make_keypair(1);
+    let (_, pk2) = make_keypair(2);
+    // Redeem script built with pk1+pk2 and pk2+pk1 in LockingPsbtRequest should produce same address.
+    let script_a = build_multisig_redeem_script(&pk1, &pk2);
+    let script_b = build_multisig_redeem_script(&pk2, &pk1);
+    assert_eq!(script_a, script_b, "BIP-67 sort must produce same script regardless of key order");
+    let addr_a = p2wsh_address(&script_a, Network::Bitcoin);
+    let addr_b = p2wsh_address(&script_b, Network::Bitcoin);
+    assert_eq!(addr_a, addr_b, "same script must produce same address");
+}
+
+#[test]
+fn locking_psbt_invalid_seller_pubkey_returns_error() {
+    let req = LockingPsbtRequest {
+        inscription_txid: FAKE_TXID.to_string(),
+        inscription_vout: 0,
+        inscription_amount_sats: 1000,
+        seller_pubkey_hex: "not-a-pubkey".to_string(),
+        marketplace_pubkey_hex: marketplace_pk_hex(),
+        network: Network::Bitcoin,
+        fee_rate_sat_vb: None,
+        gas_txid: None,
+        gas_vout: None,
+        gas_amount_sats: None,
+    };
+    assert!(build_locking_psbt(&req).is_err());
+}

@@ -4,13 +4,16 @@ use axum::{
     Json, Router,
 };
 use crate::{
-    errors::{AppError, AppResult}, 
+    errors::{AppError, AppResult},
     AppState,
     models::listing::{Listing, ListingStatus, CreateListingRequest},
     models::activity::{Activity, ActivityType},
+    services::psbt::{build_locking_psbt, decode_psbt, LockingPsbtRequest},
     ws::WsEvent,
 };
+use bitcoin::secp256k1::PublicKey;
 use serde::Deserialize;
+use std::str::FromStr;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -18,6 +21,7 @@ pub fn router() -> Router<AppState> {
         .route("/", get(list_listings).post(create_listing))
         .route("/:id", get(get_listing).delete(cancel_listing))
         .route("/:id/confirm", post(confirm_listing))
+        .route("/:id/submit-locking", post(submit_locking))
 }
 
 #[derive(Deserialize)]
@@ -40,21 +44,66 @@ async fn create_listing(
     State(state): State<AppState>,
     Json(req): Json<CreateListingRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
+    // If seller_pubkey is provided, build the locking PSBT for mempool protection.
+    let (locking_psbt_hex, multisig_address, multisig_script, protection_status) =
+        if let Some(ref seller_pubkey_hex) = req.seller_pubkey {
+            // Validate the pubkey parses.
+            PublicKey::from_str(seller_pubkey_hex)
+                .map_err(|_| AppError::BadRequest("seller_pubkey is not a valid secp256k1 compressed public key".to_string()))?;
+
+            // Resolve inscription UTXO amount — placeholder: real impl would call ord client.
+            // For now, we use a reasonable default; callers should pass inscription_amount_sats.
+            let inscription_amount_sats = req.inscription_amount_sats.unwrap_or(546);
+
+            let network = bitcoin::Network::Bitcoin; // TODO: load from config
+
+            let locking_req = LockingPsbtRequest {
+                inscription_txid: req.inscription_txid.clone()
+                    .ok_or_else(|| AppError::BadRequest("inscription_txid required for protected listing".to_string()))?,
+                inscription_vout: req.inscription_vout.unwrap_or(0),
+                inscription_amount_sats,
+                seller_pubkey_hex: seller_pubkey_hex.clone(),
+                marketplace_pubkey_hex: state.marketplace_keypair.pubkey_hex(),
+                network,
+                fee_rate_sat_vb: None, // use floor
+                gas_txid: req.gas_txid.clone(),
+                gas_vout: req.gas_vout,
+                gas_amount_sats: req.gas_amount_sats,
+            };
+
+            let locking = build_locking_psbt(&locking_req)
+                .map_err(|e| AppError::Internal(e))?;
+
+            (
+                Some(locking.psbt_hex),
+                Some(locking.multisig_address),
+                Some(locking.multisig_script_hex),
+                "locking_pending".to_string(),
+            )
+        } else {
+            (None, None, None, "none".to_string())
+        };
+
     let listing = Listing {
         id: Uuid::new_v4(),
         inscription_id: req.inscription_id.clone(),
         seller_address: req.seller_address.clone(),
         price_sats: req.price_sats,
         status: ListingStatus::Active,
-        psbt: Some(req.unsigned_psbt),
+        psbt: req.unsigned_psbt.clone(),
         royalty_address: None,
         royalty_bps: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        seller_pubkey: req.seller_pubkey.clone(),
+        multisig_address,
+        multisig_script,
+        locking_raw_tx: None, // set after seller signs and calls /submit-locking
+        protection_status,
     };
-    
+
     let created = state.db.create_listing(&listing).await.map_err(AppError::Internal)?;
-    
+
     // Insert Activity
     let activity = Activity {
         id: Uuid::new_v4(),
@@ -69,15 +118,20 @@ async fn create_listing(
         created_at: chrono::Utc::now(),
     };
     let _ = state.db.create_activity(&activity).await;
-    
+
     // Broadcast WS event
     state.ws_broadcaster.send(WsEvent::NewListing {
         inscription_id: req.inscription_id,
         price_sats: req.price_sats as u64,
         seller: req.seller_address,
     });
-    
-    Ok(Json(serde_json::json!(created)))
+
+    let mut resp = serde_json::json!(created);
+    if let Some(psbt_hex) = locking_psbt_hex {
+        resp["locking_psbt"] = serde_json::Value::String(psbt_hex);
+    }
+
+    Ok(Json(resp))
 }
 
 async fn get_listing(
@@ -97,6 +151,12 @@ async fn cancel_listing(
 ) -> AppResult<Json<serde_json::Value>> {
     let listing = state.db.get_listing(id).await.map_err(AppError::Internal)?;
     let listing = listing.ok_or_else(|| AppError::NotFound("Listing not found".to_string()))?;
+
+    // If locking tx is stored but not yet broadcast (protection_status = 'locking_pending' or 'active'),
+    // we can simply null it out — the seller never broadcast it so no on-chain cleanup needed.
+    if listing.locking_raw_tx.is_some() {
+        state.db.clear_locking_tx(id).await.map_err(AppError::Internal)?;
+    }
 
     state.db.update_listing_status(id, ListingStatus::Cancelled).await.map_err(AppError::Internal)?;
 
@@ -135,9 +195,54 @@ async fn confirm_listing(
     // Store the buyer-signed PSBT on the listing row
     state.db.update_listing_psbt(id, &req.signed_psbt).await.map_err(AppError::Internal)?;
 
-    // PSBT broadcast service not yet complete; mark as pending_broadcast
     Ok(Json(serde_json::json!({
         "listing_id": id,
         "status": "pending_broadcast"
+    })))
+}
+
+#[derive(Deserialize)]
+struct SubmitLockingRequest {
+    /// Hex of the seller-signed locking PSBT (or raw transaction hex).
+    signed_locking_psbt: String,
+}
+
+/// POST /:id/submit-locking
+/// Seller calls this after signing the locking PSBT returned by create_listing.
+/// Validates the PSBT, extracts the raw tx hex, stores it, and marks the listing active.
+/// Nothing is broadcast here — the locking tx is held until purchase time.
+async fn submit_locking(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SubmitLockingRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let listing = state.db.get_listing(id).await.map_err(AppError::Internal)?;
+    let listing = listing.ok_or_else(|| AppError::NotFound("Listing not found".to_string()))?;
+
+    // Only accept for listings in locking_pending state.
+    if listing.protection_status != "locking_pending" {
+        return Err(AppError::Conflict(format!(
+            "listing {} is not in locking_pending state (current: {})",
+            id, listing.protection_status
+        )));
+    }
+
+    // Validate it's a valid PSBT hex (structural check).
+    decode_psbt(&req.signed_locking_psbt)
+        .map_err(|e| AppError::BadRequest(format!("invalid locking PSBT: {}", e)))?;
+
+    // Extract the raw transaction from the signed PSBT.
+    let raw_tx_hex = crate::services::psbt::finalize_locking_psbt(&req.signed_locking_psbt)
+        .map_err(|e| AppError::BadRequest(format!("could not finalize locking PSBT: {}", e)))?;
+
+    // Store and activate.
+    state.db.update_locking_tx(id, &raw_tx_hex, "active")
+        .await
+        .map_err(AppError::Internal)?;
+
+    Ok(Json(serde_json::json!({
+        "listing_id": id,
+        "protection_status": "active",
+        "message": "Locking transaction stored. Listing is now protected and purchasable."
     })))
 }

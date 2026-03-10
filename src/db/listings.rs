@@ -38,8 +38,10 @@ impl Database {
     pub async fn create_listing(&self, listing: &Listing) -> Result<Listing> {
         let result = sqlx::query_as::<_, Listing>(
             r#"
-            INSERT INTO listings (id, inscription_id, seller_address, price_sats, status, psbt, royalty_address, royalty_bps)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO listings (id, inscription_id, seller_address, price_sats, status, psbt,
+                royalty_address, royalty_bps,
+                seller_pubkey, multisig_address, multisig_script, protection_status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING *
             "#
         )
@@ -51,9 +53,40 @@ impl Database {
         .bind(&listing.psbt)
         .bind(&listing.royalty_address)
         .bind(listing.royalty_bps)
+        .bind(&listing.seller_pubkey)
+        .bind(&listing.multisig_address)
+        .bind(&listing.multisig_script)
+        .bind(&listing.protection_status)
         .fetch_one(&self.pool)
         .await?;
         Ok(result)
+    }
+
+    pub async fn update_locking_tx(
+        &self,
+        id: uuid::Uuid,
+        locking_raw_tx: &str,
+        protection_status: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE listings SET locking_raw_tx = $1, protection_status = $2, updated_at = NOW() WHERE id = $3"
+        )
+        .bind(locking_raw_tx)
+        .bind(protection_status)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn clear_locking_tx(&self, id: uuid::Uuid) -> Result<()> {
+        sqlx::query(
+            "UPDATE listings SET locking_raw_tx = NULL, multisig_address = NULL, multisig_script = NULL, protection_status = 'none', updated_at = NOW() WHERE id = $1"
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn update_listing_status(&self, id: Uuid, status: ListingStatus) -> Result<()> {
