@@ -4,8 +4,8 @@ use super::{
     build_buy_psbt, build_listing_psbt, decode_psbt, encode_psbt, BuyRequest, ListingRequest,
 };
 use bitcoin::{
-    absolute::LockTime, psbt::Psbt, Amount, OutPoint, ScriptBuf, Sequence, Transaction,
-    TxIn, TxOut, Txid, Witness,
+    absolute::LockTime, psbt::Psbt, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+    TxOut, Txid, Witness,
 };
 use std::str::FromStr;
 
@@ -165,7 +165,11 @@ fn buy_psbt_has_two_inputs_three_outputs() {
     let psbt = decode_psbt(&result.psbt_hex).unwrap();
 
     assert_eq!(psbt.unsigned_tx.input.len(), 2, "2 inputs: seller + buyer");
-    assert_eq!(psbt.unsigned_tx.output.len(), 3, "3 outputs: payment + dust + change");
+    assert_eq!(
+        psbt.unsigned_tx.output.len(),
+        3,
+        "3 outputs: payment + dust + change"
+    );
 }
 
 #[test]
@@ -258,7 +262,10 @@ fn buy_psbt_insufficient_funds_returns_error() {
         buyer_utxo_amount_sats: 400_000, // less than price alone
         fee_rate_sat_vb: 10.0,
     };
-    assert!(build_buy_psbt(&req).is_err(), "insufficient funds must return error");
+    assert!(
+        build_buy_psbt(&req).is_err(),
+        "insufficient funds must return error"
+    );
 }
 
 #[test]
@@ -313,7 +320,7 @@ fn decode_invalid_psbt_bytes_returns_error() {
 
 use super::{
     build_locking_psbt, build_multisig_redeem_script, p2wsh_address, LockingPsbtRequest,
-    MIN_SELF_FUNDED, DEFAULT_LOCKING_TX_FEE_SATS,
+    DEFAULT_LOCKING_TX_FEE_SATS, MIN_SELF_FUNDED,
 };
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use bitcoin::Network;
@@ -396,7 +403,10 @@ fn locking_psbt_output_is_multisig_address() {
     assert!(!result.multisig_address.is_empty());
     assert!(!result.multisig_script_hex.is_empty());
     // Multisig address must be a P2WSH (bech32, starts with bc1q on mainnet, 62 chars).
-    assert!(result.multisig_address.starts_with("bc1q"), "must be P2WSH bech32");
+    assert!(
+        result.multisig_address.starts_with("bc1q"),
+        "must be P2WSH bech32"
+    );
 }
 
 #[test]
@@ -453,7 +463,11 @@ fn locking_psbt_with_gas_utxo_has_two_inputs() {
     };
     let result = build_locking_psbt(&req).unwrap();
     let psbt = decode_psbt(&result.psbt_hex).unwrap();
-    assert_eq!(psbt.unsigned_tx.input.len(), 2, "gas input adds a second input");
+    assert_eq!(
+        psbt.unsigned_tx.input.len(),
+        2,
+        "gas input adds a second input"
+    );
 }
 
 #[test]
@@ -463,7 +477,10 @@ fn bip67_sort_is_deterministic() {
     // Redeem script built with pk1+pk2 and pk2+pk1 in LockingPsbtRequest should produce same address.
     let script_a = build_multisig_redeem_script(&pk1, &pk2);
     let script_b = build_multisig_redeem_script(&pk2, &pk1);
-    assert_eq!(script_a, script_b, "BIP-67 sort must produce same script regardless of key order");
+    assert_eq!(
+        script_a, script_b,
+        "BIP-67 sort must produce same script regardless of key order"
+    );
     let addr_a = p2wsh_address(&script_a, Network::Bitcoin);
     let addr_b = p2wsh_address(&script_b, Network::Bitcoin);
     assert_eq!(addr_a, addr_b, "same script must produce same address");

@@ -1,12 +1,12 @@
-use crate::models::activity::Activity;
 use super::Database;
+use crate::models::activity::Activity;
 use anyhow::Result;
 use uuid::Uuid;
 
 impl Database {
     pub async fn get_activity_feed(&self, limit: i64, offset: i64) -> Result<Vec<Activity>> {
         let activities = sqlx::query_as::<_, Activity>(
-            "SELECT * FROM activity_feed ORDER BY created_at DESC LIMIT $1 OFFSET $2"
+            "SELECT * FROM activity_feed ORDER BY created_at DESC LIMIT $1 OFFSET $2",
         )
         .bind(limit)
         .bind(offset)
@@ -15,7 +15,12 @@ impl Database {
         Ok(activities)
     }
 
-    pub async fn get_activity_by_collection(&self, collection_id: Uuid, limit: i64, offset: i64) -> Result<Vec<Activity>> {
+    pub async fn get_activity_by_collection(
+        &self,
+        collection_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Activity>> {
         let activities = sqlx::query_as::<_, Activity>(
             "SELECT * FROM activity_feed WHERE collection_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
@@ -27,7 +32,12 @@ impl Database {
         Ok(activities)
     }
 
-    pub async fn get_activity_by_inscription(&self, inscription_id: &str, limit: i64, offset: i64) -> Result<Vec<Activity>> {
+    pub async fn get_activity_by_inscription(
+        &self,
+        inscription_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Activity>> {
         let activities = sqlx::query_as::<_, Activity>(
             "SELECT * FROM activity_feed WHERE inscription_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )

@@ -21,7 +21,7 @@ pub struct Listing {
     /// Partially-signed Bitcoin transaction (hex-encoded)
     pub psbt: Option<String>,
     pub royalty_address: Option<String>,
-    pub royalty_bps: Option<i32>,  // basis points
+    pub royalty_bps: Option<i32>, // basis points
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     // Mempool protection fields

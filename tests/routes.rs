@@ -9,11 +9,9 @@
 ///      returns 405.
 ///   3. A smoke test verifying the axum Router API compiles and routes
 ///      correctly.
-
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
-
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -249,8 +247,7 @@ async fn nested_router_route_is_reachable() {
 
 #[tokio::test]
 async fn json_handler_returns_correct_content_type() {
-    let app: Router =
-        Router::new().route("/data", get(|| async { Json(json!({"key": "value"})) }));
+    let app: Router = Router::new().route("/data", get(|| async { Json(json!({"key": "value"})) }));
 
     let request = Request::builder()
         .method("GET")

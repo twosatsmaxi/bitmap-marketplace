@@ -1,16 +1,14 @@
-use crate::models::sale::Sale;
 use super::Database;
+use crate::models::sale::Sale;
 use anyhow::Result;
 use uuid::Uuid;
 
 impl Database {
     pub async fn get_sale(&self, id: Uuid) -> Result<Option<Sale>> {
-        let sale = sqlx::query_as::<_, Sale>(
-            "SELECT * FROM sales WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let sale = sqlx::query_as::<_, Sale>("SELECT * FROM sales WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(sale)
     }
 

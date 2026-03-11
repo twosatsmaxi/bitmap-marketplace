@@ -1,16 +1,16 @@
-use axum::{
-    extract::{Path, State, Query},
-    routing::{get, post},
-    Json, Router,
-};
 use crate::{
     errors::{AppError, AppResult},
-    AppState,
-    models::listing::{Listing, ListingStatus, CreateListingRequest},
     models::activity::{Activity, ActivityType},
-    services::psbt::{build_locking_psbt, decode_psbt, LockingPsbtRequest},
+    models::listing::{CreateListingRequest, Listing, ListingStatus},
     services::magic_eden,
+    services::psbt::{build_locking_psbt, decode_psbt, LockingPsbtRequest},
     ws::WsEvent,
+    AppState,
+};
+use axum::{
+    extract::{Path, Query, State},
+    routing::{get, post},
+    Json, Router,
 };
 use bitcoin::secp256k1::PublicKey;
 use serde::Deserialize;
@@ -38,7 +38,11 @@ async fn list_listings(
 ) -> AppResult<Json<serde_json::Value>> {
     let limit = pagination.limit.unwrap_or(50);
     let offset = pagination.offset.unwrap_or(0);
-    let listings = state.db.list_active_listings(limit, offset).await.map_err(AppError::Internal)?;
+    let listings = state
+        .db
+        .list_active_listings(limit, offset)
+        .await
+        .map_err(AppError::Internal)?;
     Ok(Json(serde_json::json!({ "listings": listings })))
 }
 
@@ -50,8 +54,11 @@ async fn create_listing(
     let (locking_psbt_hex, multisig_address, multisig_script, protection_status) =
         if let Some(ref seller_pubkey_hex) = req.seller_pubkey {
             // Validate the pubkey parses.
-            PublicKey::from_str(seller_pubkey_hex)
-                .map_err(|_| AppError::BadRequest("seller_pubkey is not a valid secp256k1 compressed public key".to_string()))?;
+            PublicKey::from_str(seller_pubkey_hex).map_err(|_| {
+                AppError::BadRequest(
+                    "seller_pubkey is not a valid secp256k1 compressed public key".to_string(),
+                )
+            })?;
 
             // Resolve inscription UTXO amount — placeholder: real impl would call ord client.
             // For now, we use a reasonable default; callers should pass inscription_amount_sats.
@@ -60,8 +67,11 @@ async fn create_listing(
             let network = bitcoin::Network::Bitcoin; // TODO: load from config
 
             let locking_req = LockingPsbtRequest {
-                inscription_txid: req.inscription_txid.clone()
-                    .ok_or_else(|| AppError::BadRequest("inscription_txid required for protected listing".to_string()))?,
+                inscription_txid: req.inscription_txid.clone().ok_or_else(|| {
+                    AppError::BadRequest(
+                        "inscription_txid required for protected listing".to_string(),
+                    )
+                })?,
                 inscription_vout: req.inscription_vout.unwrap_or(0),
                 inscription_amount_sats,
                 seller_pubkey_hex: seller_pubkey_hex.clone(),
@@ -73,8 +83,7 @@ async fn create_listing(
                 gas_amount_sats: req.gas_amount_sats,
             };
 
-            let locking = build_locking_psbt(&locking_req)
-                .map_err(|e| AppError::Internal(e))?;
+            let locking = build_locking_psbt(&locking_req).map_err(|e| AppError::Internal(e))?;
 
             (
                 Some(locking.psbt_hex),
@@ -105,7 +114,11 @@ async fn create_listing(
         source_marketplace: None,
     };
 
-    let created = state.db.create_listing(&listing).await.map_err(AppError::Internal)?;
+    let created = state
+        .db
+        .create_listing(&listing)
+        .await
+        .map_err(AppError::Internal)?;
 
     // Insert Activity
     let activity = Activity {
@@ -158,10 +171,18 @@ async fn cancel_listing(
     // If locking tx is stored but not yet broadcast (protection_status = 'locking_pending' or 'active'),
     // we can simply null it out — the seller never broadcast it so no on-chain cleanup needed.
     if listing.locking_raw_tx.is_some() {
-        state.db.clear_locking_tx(id).await.map_err(AppError::Internal)?;
+        state
+            .db
+            .clear_locking_tx(id)
+            .await
+            .map_err(AppError::Internal)?;
     }
 
-    state.db.update_listing_status(id, ListingStatus::Cancelled).await.map_err(AppError::Internal)?;
+    state
+        .db
+        .update_listing_status(id, ListingStatus::Cancelled)
+        .await
+        .map_err(AppError::Internal)?;
 
     // Insert Activity
     let activity = Activity {
@@ -196,7 +217,11 @@ async fn confirm_listing(
     let _ = listing.ok_or_else(|| AppError::NotFound("Listing not found".to_string()))?;
 
     // Store the buyer-signed PSBT on the listing row
-    state.db.update_listing_psbt(id, &req.signed_psbt).await.map_err(AppError::Internal)?;
+    state
+        .db
+        .update_listing_psbt(id, &req.signed_psbt)
+        .await
+        .map_err(AppError::Internal)?;
 
     Ok(Json(serde_json::json!({
         "listing_id": id,
@@ -239,7 +264,9 @@ async fn submit_locking(
         .map_err(|e| AppError::BadRequest(format!("could not finalize locking PSBT: {}", e)))?;
 
     // Store and activate.
-    state.db.update_locking_tx(id, &raw_tx_hex, "active")
+    state
+        .db
+        .update_locking_tx(id, &raw_tx_hex, "active")
         .await
         .map_err(AppError::Internal)?;
 
@@ -274,7 +301,11 @@ async fn import_listings(
 
     for me in me_listings {
         // Skip if already active on our marketplace
-        match state.db.get_active_listing_by_inscription(&me.inscription_id).await {
+        match state
+            .db
+            .get_active_listing_by_inscription(&me.inscription_id)
+            .await
+        {
             Ok(Some(_)) => {
                 skipped += 1;
                 continue;
@@ -317,7 +348,11 @@ async fn import_listings(
                 imported += 1;
             }
             Err(e) => {
-                tracing::warn!("Failed to insert imported listing {}: {}", me.inscription_id, e);
+                tracing::warn!(
+                    "Failed to insert imported listing {}: {}",
+                    me.inscription_id,
+                    e
+                );
                 failed += 1;
             }
         }

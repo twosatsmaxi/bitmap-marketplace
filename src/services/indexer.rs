@@ -82,7 +82,10 @@ impl InscriptionIndexer {
             let has_more = page_data.more;
 
             for inscription_id in page_data.inscriptions {
-                if let Err(e) = self.process_inscription(&inscription_id, current_height).await {
+                if let Err(e) = self
+                    .process_inscription(&inscription_id, current_height)
+                    .await
+                {
                     tracing::warn!(
                         "InscriptionIndexer: failed to process inscription {}: {}",
                         inscription_id,
@@ -101,11 +104,7 @@ impl InscriptionIndexer {
         Ok(())
     }
 
-    async fn process_inscription(
-        &self,
-        inscription_id: &str,
-        current_height: u64,
-    ) -> Result<()> {
+    async fn process_inscription(&self, inscription_id: &str, current_height: u64) -> Result<()> {
         // Fetch full inscription details from ord.
         let ord_inscription = self.ord.get_inscription(inscription_id).await?;
 
@@ -167,11 +166,10 @@ impl InscriptionIndexer {
                     new_owner
                 );
 
-                let genesis_timestamp =
-                    ord_inscription.genesis_timestamp.map(|ts| {
-                        chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
-                            .unwrap_or_else(chrono::Utc::now)
-                    });
+                let genesis_timestamp = ord_inscription.genesis_timestamp.map(|ts| {
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+                        .unwrap_or_else(chrono::Utc::now)
+                });
 
                 let inscription = Inscription {
                     id: Uuid::new_v4(),

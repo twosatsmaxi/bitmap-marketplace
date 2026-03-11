@@ -38,11 +38,11 @@ impl RoyaltyEnforcement {
     /// Verify that a PSBT includes the correct royalty output.
     /// Returns Ok(()) if royalty is properly included or not required.
     pub fn verify_royalty_in_psbt(psbt_hex: &str, royalty: &RoyaltyInfo) -> Result<()> {
-        let bytes = hex::decode(psbt_hex)
-            .map_err(|e| anyhow!("Failed to decode PSBT hex: {}", e))?;
+        let bytes =
+            hex::decode(psbt_hex).map_err(|e| anyhow!("Failed to decode PSBT hex: {}", e))?;
 
-        let psbt = Psbt::deserialize(&bytes)
-            .map_err(|e| anyhow!("Failed to deserialize PSBT: {}", e))?;
+        let psbt =
+            Psbt::deserialize(&bytes).map_err(|e| anyhow!("Failed to deserialize PSBT: {}", e))?;
 
         // Parse the royalty address to get its script pubkey
         let royalty_script = {
@@ -60,9 +60,10 @@ impl RoyaltyEnforcement {
         // Search the unsigned transaction outputs for a matching output
         let tx = &psbt.unsigned_tx;
         let required = Amount::from_sat(royalty.amount_sats);
-        let found = tx.output.iter().any(|out| {
-            out.script_pubkey == royalty_script && out.value >= required
-        });
+        let found = tx
+            .output
+            .iter()
+            .any(|out| out.script_pubkey == royalty_script && out.value >= required);
 
         if found {
             Ok(())
@@ -117,10 +118,8 @@ mod tests {
     /// serialize it to hex, and return the hex string.
     fn build_psbt_hex(outputs: Vec<bitcoin::TxOut>) -> String {
         use bitcoin::{
-            absolute::LockTime,
-            hashes::Hash,
-            psbt::Psbt,
-            OutPoint, ScriptBuf, Sequence, Transaction, TxIn, Txid, Witness,
+            absolute::LockTime, hashes::Hash, psbt::Psbt, OutPoint, ScriptBuf, Sequence,
+            Transaction, TxIn, Txid, Witness,
         };
 
         let dummy_input = TxIn {

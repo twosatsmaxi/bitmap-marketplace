@@ -1,14 +1,14 @@
+use crate::{
+    errors::{AppError, AppResult},
+    models::activity::{Activity, ActivityType},
+    models::offer::{Offer, OfferStatus},
+    ws::WsEvent,
+    AppState,
+};
 use axum::{
     extract::{Path, Query, State},
     routing::{delete, get, post},
     Json, Router,
-};
-use crate::{
-    errors::{AppError, AppResult},
-    models::offer::{Offer, OfferStatus},
-    models::activity::{Activity, ActivityType},
-    ws::WsEvent,
-    AppState,
 };
 use chrono::Utc;
 use serde::Deserialize;
@@ -61,7 +61,11 @@ async fn create_offer(
         updated_at: Utc::now(),
     };
 
-    let created = state.db.create_offer(&offer).await.map_err(AppError::Internal)?;
+    let created = state
+        .db
+        .create_offer(&offer)
+        .await
+        .map_err(AppError::Internal)?;
 
     // Activity: log offer received
     let activity = Activity {
@@ -121,10 +125,7 @@ async fn accept_offer(
     // Check expiry
     if let Some(exp) = offer.expires_at {
         if Utc::now() > exp {
-            let _ = state
-                .db
-                .update_offer_status(id, OfferStatus::Expired)
-                .await;
+            let _ = state.db.update_offer_status(id, OfferStatus::Expired).await;
             return Err(AppError::BadRequest("Offer has expired".into()));
         }
     }
@@ -179,7 +180,9 @@ async fn cancel_offer(
         .ok_or_else(|| AppError::NotFound("Offer not found".into()))?;
 
     if offer.status != OfferStatus::Pending {
-        return Err(AppError::BadRequest("Only pending offers can be cancelled".into()));
+        return Err(AppError::BadRequest(
+            "Only pending offers can be cancelled".into(),
+        ));
     }
 
     state
@@ -188,5 +191,7 @@ async fn cancel_offer(
         .await
         .map_err(AppError::Internal)?;
 
-    Ok(Json(serde_json::json!({ "offer_id": id, "status": "cancelled" })))
+    Ok(Json(
+        serde_json::json!({ "offer_id": id, "status": "cancelled" }),
+    ))
 }

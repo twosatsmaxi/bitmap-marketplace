@@ -161,17 +161,16 @@ impl MempoolWatcher {
                 }
 
                 // --- Fetch the listing's collection_id (best-effort) ---
-                let collection_id: Option<Uuid> =
-                    match sqlx::query_scalar::<_, Option<Uuid>>(
-                        "SELECT i.collection_id FROM inscriptions i WHERE i.inscription_id = $1",
-                    )
-                    .bind(&sale.inscription_id)
-                    .fetch_optional(&self.db.pool)
-                    .await
-                    {
-                        Ok(Some(cid)) => cid,
-                        _ => None,
-                    };
+                let collection_id: Option<Uuid> = match sqlx::query_scalar::<_, Option<Uuid>>(
+                    "SELECT i.collection_id FROM inscriptions i WHERE i.inscription_id = $1",
+                )
+                .bind(&sale.inscription_id)
+                .fetch_optional(&self.db.pool)
+                .await
+                {
+                    Ok(Some(cid)) => cid,
+                    _ => None,
+                };
 
                 // --- Insert into activity_feed: activity_type = sale ---
                 let activity = Activity {

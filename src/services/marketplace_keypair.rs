@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
-use bitcoin::secp256k1::{All, Message, Secp256k1, SecretKey};
 use bitcoin::secp256k1::ecdsa::Signature;
+use bitcoin::secp256k1::{All, Message, Secp256k1, SecretKey};
 use std::sync::Arc;
 
 pub struct MarketplaceKeypair {
@@ -22,8 +22,8 @@ impl MarketplaceKeypair {
             ));
         }
         let secp = Secp256k1::new();
-        let secret_key = SecretKey::from_slice(&bytes)
-            .map_err(|e| anyhow!("invalid secret key: {}", e))?;
+        let secret_key =
+            SecretKey::from_slice(&bytes).map_err(|e| anyhow!("invalid secret key: {}", e))?;
         Ok(Arc::new(Self { secp, secret_key }))
     }
 

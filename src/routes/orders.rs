@@ -1,19 +1,19 @@
-use axum::{
-    extract::{Path, State},
-    routing::{get, post},
-    Json, Router,
-};
 use crate::{
     errors::{AppError, AppResult},
-    AppState,
     models::activity::{Activity, ActivityType},
     models::listing::BuyListingRequest,
     models::sale::Sale,
     services::psbt::{
-        build_buy_psbt, build_protected_sale_psbt, apply_marketplace_signature,
-        finalize_multisig_and_extract, finalize_and_extract, BuyRequest, ProtectedSalePsbtRequest,
+        apply_marketplace_signature, build_buy_psbt, build_protected_sale_psbt,
+        finalize_and_extract, finalize_multisig_and_extract, BuyRequest, ProtectedSalePsbtRequest,
     },
     ws::WsEvent,
+    AppState,
+};
+use axum::{
+    extract::{Path, State},
+    routing::{get, post},
+    Json, Router,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -34,28 +34,44 @@ async fn buy(
     State(state): State<AppState>,
     Json(req): Json<BuyListingRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let listing = state.db.get_listing(req.listing_id).await.map_err(AppError::Internal)?;
+    let listing = state
+        .db
+        .get_listing(req.listing_id)
+        .await
+        .map_err(AppError::Internal)?;
     let listing = listing.ok_or_else(|| AppError::NotFound("Listing not found".to_string()))?;
 
     if listing.protection_status == "locking_pending" {
         return Err(AppError::Conflict(
-            "Listing is waiting for seller to submit the locking transaction. Try again shortly.".to_string()
+            "Listing is waiting for seller to submit the locking transaction. Try again shortly."
+                .to_string(),
         ));
     }
 
     if listing.protection_status == "active" {
         // Protected flow: spend from locking tx.
-        let locking_raw_tx = listing.locking_raw_tx
-            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("listing is active but missing locking_raw_tx")))?;
-        let multisig_script = listing.multisig_script
-            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("listing is active but missing multisig_script")))?;
+        let locking_raw_tx = listing.locking_raw_tx.ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(
+                "listing is active but missing locking_raw_tx"
+            ))
+        })?;
+        let multisig_script = listing.multisig_script.ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(
+                "listing is active but missing multisig_script"
+            ))
+        })?;
 
-        let buyer_utxo_txid = req.buyer_utxo_txid
-            .ok_or_else(|| AppError::BadRequest("buyer_utxo_txid required for protected purchase".to_string()))?;
-        let buyer_utxo_vout = req.buyer_utxo_vout
-            .ok_or_else(|| AppError::BadRequest("buyer_utxo_vout required for protected purchase".to_string()))?;
-        let buyer_utxo_amount_sats = req.buyer_utxo_amount_sats
-            .ok_or_else(|| AppError::BadRequest("buyer_utxo_amount_sats required for protected purchase".to_string()))?;
+        let buyer_utxo_txid = req.buyer_utxo_txid.ok_or_else(|| {
+            AppError::BadRequest("buyer_utxo_txid required for protected purchase".to_string())
+        })?;
+        let buyer_utxo_vout = req.buyer_utxo_vout.ok_or_else(|| {
+            AppError::BadRequest("buyer_utxo_vout required for protected purchase".to_string())
+        })?;
+        let buyer_utxo_amount_sats = req.buyer_utxo_amount_sats.ok_or_else(|| {
+            AppError::BadRequest(
+                "buyer_utxo_amount_sats required for protected purchase".to_string(),
+            )
+        })?;
 
         let psbt_req = ProtectedSalePsbtRequest {
             locking_raw_tx_hex: locking_raw_tx,
@@ -70,8 +86,7 @@ async fn buy(
             fee_rate_sat_vb: req.fee_rate_sat_vb.unwrap_or(5.0),
         };
 
-        let result = build_protected_sale_psbt(&psbt_req)
-            .map_err(|e| AppError::Internal(e))?;
+        let result = build_protected_sale_psbt(&psbt_req).map_err(|e| AppError::Internal(e))?;
 
         return Ok(Json(serde_json::json!({
             "psbt": result.psbt_hex,
@@ -82,17 +97,21 @@ async fn buy(
     }
 
     // Legacy flow: unprotected listing.
-    let seller_psbt_hex = listing.psbt
+    let seller_psbt_hex = listing
+        .psbt
         .ok_or_else(|| AppError::BadRequest("listing has no PSBT".to_string()))?;
 
     let buy_req = BuyRequest {
         seller_psbt_hex,
         buyer_address: req.buyer_address.clone(),
-        buyer_utxo_txid: req.buyer_utxo_txid
+        buyer_utxo_txid: req
+            .buyer_utxo_txid
             .ok_or_else(|| AppError::BadRequest("buyer_utxo_txid required".to_string()))?,
-        buyer_utxo_vout: req.buyer_utxo_vout
+        buyer_utxo_vout: req
+            .buyer_utxo_vout
             .ok_or_else(|| AppError::BadRequest("buyer_utxo_vout required".to_string()))?,
-        buyer_utxo_amount_sats: req.buyer_utxo_amount_sats
+        buyer_utxo_amount_sats: req
+            .buyer_utxo_amount_sats
             .ok_or_else(|| AppError::BadRequest("buyer_utxo_amount_sats required".to_string()))?,
         fee_rate_sat_vb: req.fee_rate_sat_vb.unwrap_or(5.0),
     };
@@ -145,47 +164,60 @@ async fn confirm_order(
     State(state): State<AppState>,
     Json(req): Json<ConfirmOrderRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let listing = state.db.get_listing(req.listing_id).await.map_err(AppError::Internal)?;
+    let listing = state
+        .db
+        .get_listing(req.listing_id)
+        .await
+        .map_err(AppError::Internal)?;
     let listing = listing.ok_or_else(|| AppError::NotFound("Listing not found".to_string()))?;
 
-    let rpc = crate::services::bitcoin_rpc::BitcoinRpc::new()
-        .map_err(|e| AppError::Internal(e))?;
+    let rpc = crate::services::bitcoin_rpc::BitcoinRpc::new().map_err(|e| AppError::Internal(e))?;
 
-    let buyer_address = req.buyer_address
-        .unwrap_or_else(|| "unknown".to_string());
+    let buyer_address = req.buyer_address.unwrap_or_else(|| "unknown".to_string());
 
     if listing.protection_status == "active" {
         // Protected flow.
-        let locking_raw_tx = listing.locking_raw_tx
+        let locking_raw_tx = listing
+            .locking_raw_tx
             .ok_or_else(|| AppError::Internal(anyhow::anyhow!("missing locking_raw_tx")))?;
-        let seller_pubkey = listing.seller_pubkey
+        let seller_pubkey = listing
+            .seller_pubkey
             .ok_or_else(|| AppError::Internal(anyhow::anyhow!("missing seller_pubkey")))?;
 
         // Apply marketplace SIGHASH_ALL co-sig.
-        let cosigned_psbt = apply_marketplace_signature(
-            &req.signed_psbt,
-            &state.marketplace_keypair,
-        ).map_err(|e| AppError::Internal(e))?;
+        let cosigned_psbt =
+            apply_marketplace_signature(&req.signed_psbt, &state.marketplace_keypair)
+                .map_err(|e| AppError::Internal(e))?;
 
         // Finalize P2WSH witness and extract raw sale tx.
         let sale_raw_tx = finalize_multisig_and_extract(
             &cosigned_psbt,
             &seller_pubkey,
             &state.marketplace_keypair.pubkey_hex(),
-        ).map_err(|e| AppError::Internal(e))?;
+        )
+        .map_err(|e| AppError::Internal(e))?;
 
         // Package broadcast: [locking_tx, sale_tx].
-        let txids = rpc.submit_package(&[&locking_raw_tx, &sale_raw_tx])
+        let txids = rpc
+            .submit_package(&[&locking_raw_tx, &sale_raw_tx])
             .map_err(|e| AppError::Internal(e))?;
 
-        let sale_txid = txids.last().cloned().unwrap_or_else(|| "unknown".to_string());
-        let locking_txid = txids.first().cloned()
+        let sale_txid = txids
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        let locking_txid = txids
+            .first()
+            .cloned()
             .or(req.locking_txid)
             .unwrap_or_else(|| "unknown".to_string());
 
         // Mark listing sold.
-        state.db.update_listing_status(listing.id, crate::models::listing::ListingStatus::Sold)
-            .await.map_err(AppError::Internal)?;
+        state
+            .db
+            .update_listing_status(listing.id, crate::models::listing::ListingStatus::Sold)
+            .await
+            .map_err(AppError::Internal)?;
 
         // Create Sale row.
         let sale = Sale {
@@ -202,7 +234,11 @@ async fn confirm_order(
             confirmed_at: None,
             created_at: chrono::Utc::now(),
         };
-        state.db.create_sale(&sale).await.map_err(AppError::Internal)?;
+        state
+            .db
+            .create_sale(&sale)
+            .await
+            .map_err(AppError::Internal)?;
 
         state.ws_broadcaster.send(WsEvent::SaleConfirmed {
             inscription_id: listing.inscription_id.clone(),
@@ -220,14 +256,17 @@ async fn confirm_order(
     }
 
     // Legacy flow: finalize and broadcast via sendrawtransaction.
-    let raw_tx = finalize_and_extract(&req.signed_psbt)
+    let raw_tx = finalize_and_extract(&req.signed_psbt).map_err(|e| AppError::Internal(e))?;
+
+    let tx_id = rpc
+        .broadcast_transaction(&raw_tx)
         .map_err(|e| AppError::Internal(e))?;
 
-    let tx_id = rpc.broadcast_transaction(&raw_tx)
-        .map_err(|e| AppError::Internal(e))?;
-
-    state.db.update_listing_status(listing.id, crate::models::listing::ListingStatus::Sold)
-        .await.map_err(AppError::Internal)?;
+    state
+        .db
+        .update_listing_status(listing.id, crate::models::listing::ListingStatus::Sold)
+        .await
+        .map_err(AppError::Internal)?;
 
     let sale = Sale {
         id: Uuid::new_v4(),
@@ -243,7 +282,11 @@ async fn confirm_order(
         confirmed_at: None,
         created_at: chrono::Utc::now(),
     };
-    state.db.create_sale(&sale).await.map_err(AppError::Internal)?;
+    state
+        .db
+        .create_sale(&sale)
+        .await
+        .map_err(AppError::Internal)?;
 
     state.ws_broadcaster.send(WsEvent::SaleConfirmed {
         inscription_id: listing.inscription_id.clone(),

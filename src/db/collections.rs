@@ -1,35 +1,31 @@
-use crate::models::collection::{Collection, CollectionStats};
 use super::Database;
+use crate::models::collection::{Collection, CollectionStats};
 use anyhow::Result;
 use uuid::Uuid;
 
 impl Database {
     pub async fn get_collection_by_id(&self, id: Uuid) -> Result<Option<Collection>> {
-        let collection = sqlx::query_as::<_, Collection>(
-            "SELECT * FROM collections WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let collection = sqlx::query_as::<_, Collection>("SELECT * FROM collections WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(collection)
     }
 
     pub async fn get_collection_by_slug(&self, slug: &str) -> Result<Option<Collection>> {
-        let collection = sqlx::query_as::<_, Collection>(
-            "SELECT * FROM collections WHERE slug = $1"
-        )
-        .bind(slug)
-        .fetch_optional(&self.pool)
-        .await?;
+        let collection =
+            sqlx::query_as::<_, Collection>("SELECT * FROM collections WHERE slug = $1")
+                .bind(slug)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(collection)
     }
 
     pub async fn list_collections(&self) -> Result<Vec<Collection>> {
-        let collections = sqlx::query_as::<_, Collection>(
-            "SELECT * FROM collections ORDER BY created_at DESC"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let collections =
+            sqlx::query_as::<_, Collection>("SELECT * FROM collections ORDER BY created_at DESC")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(collections)
     }
 
@@ -60,7 +56,10 @@ impl Database {
         Ok(collection)
     }
 
-    pub async fn get_collection_stats(&self, collection_id: Uuid) -> Result<Option<CollectionStats>> {
+    pub async fn get_collection_stats(
+        &self,
+        collection_id: Uuid,
+    ) -> Result<Option<CollectionStats>> {
         let stats = sqlx::query_as::<_, CollectionStats>(
             r#"
             SELECT 

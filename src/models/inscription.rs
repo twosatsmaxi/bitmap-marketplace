@@ -5,7 +5,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Inscription {
     pub id: Uuid,
-    pub inscription_id: String,  // <txid>i<index>
+    pub inscription_id: String, // <txid>i<index>
     pub inscription_number: i64,
     pub content_type: Option<String>,
     pub content_length: Option<i64>,

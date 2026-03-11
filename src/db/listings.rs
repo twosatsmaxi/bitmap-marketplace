@@ -1,20 +1,21 @@
-use crate::models::listing::{Listing, ListingStatus};
 use super::Database;
+use crate::models::listing::{Listing, ListingStatus};
 use anyhow::Result;
 use uuid::Uuid;
 
 impl Database {
     pub async fn get_listing(&self, id: Uuid) -> Result<Option<Listing>> {
-        let listing = sqlx::query_as::<_, Listing>(
-            "SELECT * FROM listings WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let listing = sqlx::query_as::<_, Listing>("SELECT * FROM listings WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(listing)
     }
 
-    pub async fn get_active_listing_by_inscription(&self, inscription_id: &str) -> Result<Option<Listing>> {
+    pub async fn get_active_listing_by_inscription(
+        &self,
+        inscription_id: &str,
+    ) -> Result<Option<Listing>> {
         let listing = sqlx::query_as::<_, Listing>(
             "SELECT * FROM listings WHERE inscription_id = $1 AND status = 'active' ORDER BY created_at DESC LIMIT 1"
         )
@@ -91,24 +92,20 @@ impl Database {
     }
 
     pub async fn update_listing_status(&self, id: Uuid, status: ListingStatus) -> Result<()> {
-        sqlx::query(
-            "UPDATE listings SET status = $1, updated_at = NOW() WHERE id = $2"
-        )
-        .bind(status)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE listings SET status = $1, updated_at = NOW() WHERE id = $2")
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     pub async fn update_listing_psbt(&self, id: Uuid, psbt: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE listings SET psbt = $1, updated_at = NOW() WHERE id = $2"
-        )
-        .bind(psbt)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE listings SET psbt = $1, updated_at = NOW() WHERE id = $2")
+            .bind(psbt)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }

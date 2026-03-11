@@ -3,6 +3,7 @@ use axum::Router;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::GovernorLayer;
 use tower_http::compression::CompressionLayer;
@@ -10,7 +11,6 @@ use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
-use tower::limit::ConcurrencyLimitLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod db;
@@ -95,7 +95,9 @@ async fn main() -> Result<()> {
     // /api subrouter — full hardening stack
     // Bitcoin RPC calls can take up to 10s, so we use 30s timeout to be safe.
     let api_router = routes::router()
-        .layer(GovernorLayer { config: Arc::clone(&governor_conf) })
+        .layer(GovernorLayer {
+            config: Arc::clone(&governor_conf),
+        })
         .layer(ConcurrencyLimitLayer::new(500))
         .layer(RequestBodyLimitLayer::new(512 * 1024)) // 512KB explicit limit
         .layer(TimeoutLayer::new(Duration::from_secs(30)));
@@ -123,9 +125,12 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     // into_make_service_with_connect_info is required for PeerIpKeyExtractor to work.
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     Ok(())
 }

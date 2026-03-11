@@ -1,16 +1,14 @@
-use crate::models::offer::{Offer, OfferStatus};
 use super::Database;
+use crate::models::offer::{Offer, OfferStatus};
 use anyhow::Result;
 use uuid::Uuid;
 
 impl Database {
     pub async fn get_offer(&self, id: Uuid) -> Result<Option<Offer>> {
-        let offer = sqlx::query_as::<_, Offer>(
-            "SELECT * FROM offers WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let offer = sqlx::query_as::<_, Offer>("SELECT * FROM offers WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(offer)
     }
 
@@ -45,13 +43,11 @@ impl Database {
     }
 
     pub async fn update_offer_status(&self, id: Uuid, status: OfferStatus) -> Result<()> {
-        sqlx::query(
-            "UPDATE offers SET status = $1, updated_at = NOW() WHERE id = $2"
-        )
-        .bind(status)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE offers SET status = $1, updated_at = NOW() WHERE id = $2")
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }

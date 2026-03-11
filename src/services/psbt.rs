@@ -339,12 +339,19 @@ pub fn finalize_and_extract(signed_psbt_hex: &str) -> Result<String> {
 
 /// Sort two compressed pubkeys lexicographically (BIP-67) for deterministic multisig.
 fn bip67_sort(a: &[u8; 33], b: &[u8; 33]) -> ([u8; 33], [u8; 33]) {
-    if a <= b { (*a, *b) } else { (*b, *a) }
+    if a <= b {
+        (*a, *b)
+    } else {
+        (*b, *a)
+    }
 }
 
 /// Build the P2WSH 2-of-2 multisig redeem script (witness script).
 /// Keys are BIP-67 sorted for deterministic address derivation.
-pub fn build_multisig_redeem_script(seller_pk: &PublicKey, marketplace_pk: &PublicKey) -> ScriptBuf {
+pub fn build_multisig_redeem_script(
+    seller_pk: &PublicKey,
+    marketplace_pk: &PublicKey,
+) -> ScriptBuf {
     let (pk1, pk2) = bip67_sort(&seller_pk.serialize(), &marketplace_pk.serialize());
     ScriptBuilder::new()
         .push_opcode(op::OP_PUSHNUM_2)
@@ -490,15 +497,17 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
     let witness_script = ScriptBuf::from_bytes(multisig_script_bytes);
 
     const INSCRIPTION_DUST_SATS: u64 = 546;
-    let estimated_fee_sats =
-        (estimate_tx_vbytes(2, 3) as f64 * req.fee_rate_sat_vb) as u64;
+    let estimated_fee_sats = (estimate_tx_vbytes(2, 3) as f64 * req.fee_rate_sat_vb) as u64;
     let total_required = req.price_sats + INSCRIPTION_DUST_SATS + estimated_fee_sats;
 
     if req.buyer_utxo_amount_sats < total_required {
         return Err(anyhow!(
             "buyer UTXO ({} sats) insufficient; need {} sats (price {} + dust {} + fee {})",
-            req.buyer_utxo_amount_sats, total_required,
-            req.price_sats, INSCRIPTION_DUST_SATS, estimated_fee_sats
+            req.buyer_utxo_amount_sats,
+            total_required,
+            req.price_sats,
+            INSCRIPTION_DUST_SATS,
+            estimated_fee_sats
         ));
     }
 
@@ -595,11 +604,18 @@ pub fn apply_marketplace_signature(
     // Compute SIGHASH_ALL for input 0.
     let mut sighash_cache = SighashCache::new(&psbt.unsigned_tx);
     let sighash = sighash_cache
-        .p2wsh_signature_hash(0, &witness_script, witness_utxo.value, EcdsaSighashType::All)
+        .p2wsh_signature_hash(
+            0,
+            &witness_script,
+            witness_utxo.value,
+            EcdsaSighashType::All,
+        )
         .map_err(|e| anyhow!("sighash computation failed: {}", e))?;
 
     let sighash_slice: &[u8] = sighash.as_ref();
-    let sighash_bytes: [u8; 32] = sighash_slice.try_into().expect("sighash is always 32 bytes");
+    let sighash_bytes: [u8; 32] = sighash_slice
+        .try_into()
+        .expect("sighash is always 32 bytes");
     let sig = marketplace_keypair.sign_sighash(&sighash_bytes)?;
     let ecdsa_sig = bitcoin::ecdsa::Signature {
         sig,
@@ -663,7 +679,7 @@ pub fn finalize_multisig_and_extract(
 
     // P2WSH OP_CHECKMULTISIG witness: [OP_0 (empty bytes), sig1, sig2, witness_script]
     let witness = Witness::from_slice(&[
-        &[][..],              // OP_0 / dummy for CHECKMULTISIG bug
+        &[][..], // OP_0 / dummy for CHECKMULTISIG bug
         &first_sig.to_vec(),
         &second_sig.to_vec(),
         witness_script.as_bytes(),

@@ -1,11 +1,11 @@
 use anyhow::{anyhow, Result};
-use bitcoin::{Network, Transaction, Txid};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::consensus::deserialize;
+use bitcoin::{Network, Transaction, Txid};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 use serde_json::json;
+use std::str::FromStr;
 
 pub struct BitcoinRpc {
     client: Client,
@@ -35,10 +35,8 @@ impl BitcoinRpc {
     pub fn new() -> Result<Self> {
         let url = std::env::var("BITCOIN_RPC_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8332".to_string());
-        let user = std::env::var("BITCOIN_RPC_USER")
-            .unwrap_or_else(|_| "bitcoin".to_string());
-        let pass = std::env::var("BITCOIN_RPC_PASS")
-            .unwrap_or_else(|_| "bitcoin".to_string());
+        let user = std::env::var("BITCOIN_RPC_USER").unwrap_or_else(|_| "bitcoin".to_string());
+        let pass = std::env::var("BITCOIN_RPC_PASS").unwrap_or_else(|_| "bitcoin".to_string());
 
         let client = Client::new(&url, Auth::UserPass(user, pass))?;
         Ok(Self { client })
@@ -88,7 +86,9 @@ impl BitcoinRpc {
                     .address
                     .as_ref()
                     .or_else(|| out.script_pub_key.addresses.first())
-                    .map(|a: &bitcoin::Address<NetworkUnchecked>| a.clone().assume_checked_ref().to_string());
+                    .map(|a: &bitcoin::Address<NetworkUnchecked>| {
+                        a.clone().assume_checked_ref().to_string()
+                    });
 
                 let script_pubkey = hex::encode(&out.script_pub_key.hex);
 
@@ -109,9 +109,9 @@ impl BitcoinRpc {
     pub fn estimate_fee_rate(&self, target_blocks: u16) -> Result<FeeEstimate> {
         let result = self.client.estimate_smart_fee(target_blocks, None)?;
 
-        let fee_rate = result
-            .fee_rate
-            .ok_or_else(|| anyhow!("Fee estimation unavailable: no fee rate returned (need more data)"))?;
+        let fee_rate = result.fee_rate.ok_or_else(|| {
+            anyhow!("Fee estimation unavailable: no fee rate returned (need more data)")
+        })?;
 
         // fee_rate is in BTC/kvB; convert to sat/vB:
         //   1 BTC = 100_000_000 sat, 1 kvB = 1000 vB
@@ -158,9 +158,7 @@ impl BitcoinRpc {
     /// Returns the txids of successfully accepted transactions.
     pub fn submit_package(&self, txns: &[&str]) -> Result<Vec<String>> {
         let tx_array: Vec<serde_json::Value> = txns.iter().map(|tx| json!(tx)).collect();
-        let result: serde_json::Value = self
-            .client
-            .call("submitpackage", &[json!(tx_array)])?;
+        let result: serde_json::Value = self.client.call("submitpackage", &[json!(tx_array)])?;
 
         // submitpackage returns {"tx-results": {txid: {...}}, "replaced-transactions": [...]}
         // Extract accepted txids from tx-results keys.

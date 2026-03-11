@@ -68,8 +68,8 @@ impl OrdClient {
     /// The base URL is taken from the `ORD_URL` environment variable,
     /// falling back to `http://127.0.0.1:80` when the variable is absent.
     pub fn new() -> Self {
-        let base_url = std::env::var("ORD_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:80".to_string());
+        let base_url =
+            std::env::var("ORD_URL").unwrap_or_else(|_| "http://127.0.0.1:80".to_string());
         Self {
             base_url,
             http: Client::new(),
@@ -164,19 +164,14 @@ impl OrdClient {
     /// The ord REST API does not expose a dedicated per-address endpoint in all
     /// versions. This implementation targets the `/inscriptions/address/{addr}`
     /// path. If your ord node version uses a different route, adjust accordingly.
-    pub async fn get_inscriptions_by_address(
-        &self,
-        addr: &str,
-    ) -> Result<Vec<OrdInscription>> {
+    pub async fn get_inscriptions_by_address(&self, addr: &str) -> Result<Vec<OrdInscription>> {
         let mut all_ids: Vec<String> = Vec::new();
         let mut page: u32 = 0;
 
         // Paginate through all pages until the server signals there are no more.
         loop {
             let page_data = self
-                .get_json::<InscriptionPage>(&format!(
-                    "/inscriptions/address/{addr}?page={page}"
-                ))
+                .get_json::<InscriptionPage>(&format!("/inscriptions/address/{addr}?page={page}"))
                 .await?;
 
             all_ids.extend(page_data.inscriptions);

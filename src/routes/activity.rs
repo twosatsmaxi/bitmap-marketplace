@@ -1,10 +1,16 @@
-use axum::{extract::{State, Query}, routing::get, Json, Router};
-use crate::{errors::{AppError, AppResult}, AppState};
+use crate::{
+    errors::{AppError, AppResult},
+    AppState,
+};
+use axum::{
+    extract::{Query, State},
+    routing::get,
+    Json, Router,
+};
 use serde::Deserialize;
 
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/", get(get_activity))
+    Router::new().route("/", get(get_activity))
 }
 
 #[derive(Deserialize)]
@@ -19,6 +25,10 @@ async fn get_activity(
 ) -> AppResult<Json<serde_json::Value>> {
     let limit = pagination.limit.unwrap_or(50);
     let offset = pagination.offset.unwrap_or(0);
-    let activity = state.db.get_activity_feed(limit, offset).await.map_err(AppError::Internal)?;
+    let activity = state
+        .db
+        .get_activity_feed(limit, offset)
+        .await
+        .map_err(AppError::Internal)?;
     Ok(Json(serde_json::json!({ "activity": activity })))
 }

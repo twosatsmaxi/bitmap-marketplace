@@ -128,28 +128,20 @@ fn event_matches(event: &WsEvent, filter: &Option<WsSubscribe>) -> bool {
 // Axum handler
 // ---------------------------------------------------------------------------
 
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // Step 1 – try to read an optional subscribe message within 5 seconds.
-    let filter: Option<WsSubscribe> = tokio::time::timeout(
-        Duration::from_secs(5),
-        socket.recv(),
-    )
-    .await
-    .ok()                          // timeout expired → None
-    .and_then(|opt_msg| opt_msg)  // no message from client → None
-    .and_then(|msg| match msg {
-        Ok(Message::Text(text)) => {
-            serde_json::from_str::<WsSubscribe>(&text).ok()
-        }
-        _ => None,
-    });
+    let filter: Option<WsSubscribe> = tokio::time::timeout(Duration::from_secs(5), socket.recv())
+        .await
+        .ok() // timeout expired → None
+        .and_then(|opt_msg| opt_msg) // no message from client → None
+        .and_then(|msg| match msg {
+            Ok(Message::Text(text)) => serde_json::from_str::<WsSubscribe>(&text).ok(),
+            _ => None,
+        });
 
     // Step 2 – subscribe to the broadcast channel.
     let mut rx = state.ws_broadcaster.subscribe();
@@ -214,10 +206,22 @@ mod tests {
             seller: "bc1qseller".to_string(),
         };
         let json = serde_json::to_string(&event).expect("serialization failed");
-        assert!(json.contains("\"type\":\"new_listing\""), "missing type field: {json}");
-        assert!(json.contains("\"inscription_id\":\"abc123i0\""), "missing inscription_id: {json}");
-        assert!(json.contains("\"price_sats\":50000"), "missing price_sats: {json}");
-        assert!(json.contains("\"seller\":\"bc1qseller\""), "missing seller: {json}");
+        assert!(
+            json.contains("\"type\":\"new_listing\""),
+            "missing type field: {json}"
+        );
+        assert!(
+            json.contains("\"inscription_id\":\"abc123i0\""),
+            "missing inscription_id: {json}"
+        );
+        assert!(
+            json.contains("\"price_sats\":50000"),
+            "missing price_sats: {json}"
+        );
+        assert!(
+            json.contains("\"seller\":\"bc1qseller\""),
+            "missing seller: {json}"
+        );
     }
 
     #[test]
@@ -229,11 +233,26 @@ mod tests {
             tx_id: "deadbeeftx".to_string(),
         };
         let json = serde_json::to_string(&event).expect("serialization failed");
-        assert!(json.contains("\"type\":\"sale_confirmed\""), "missing type field: {json}");
-        assert!(json.contains("\"inscription_id\":\"def456i0\""), "missing inscription_id: {json}");
-        assert!(json.contains("\"price_sats\":100000"), "missing price_sats: {json}");
-        assert!(json.contains("\"buyer\":\"bc1qbuyer\""), "missing buyer: {json}");
-        assert!(json.contains("\"tx_id\":\"deadbeeftx\""), "missing tx_id: {json}");
+        assert!(
+            json.contains("\"type\":\"sale_confirmed\""),
+            "missing type field: {json}"
+        );
+        assert!(
+            json.contains("\"inscription_id\":\"def456i0\""),
+            "missing inscription_id: {json}"
+        );
+        assert!(
+            json.contains("\"price_sats\":100000"),
+            "missing price_sats: {json}"
+        );
+        assert!(
+            json.contains("\"buyer\":\"bc1qbuyer\""),
+            "missing buyer: {json}"
+        );
+        assert!(
+            json.contains("\"tx_id\":\"deadbeeftx\""),
+            "missing tx_id: {json}"
+        );
     }
 
     #[test]
@@ -244,10 +263,22 @@ mod tests {
             buyer: "bc1qofferer".to_string(),
         };
         let json = serde_json::to_string(&event).expect("serialization failed");
-        assert!(json.contains("\"type\":\"offer_received\""), "missing type field: {json}");
-        assert!(json.contains("\"inscription_id\":\"ghi789i0\""), "missing inscription_id: {json}");
-        assert!(json.contains("\"price_sats\":75000"), "missing price_sats: {json}");
-        assert!(json.contains("\"buyer\":\"bc1qofferer\""), "missing buyer: {json}");
+        assert!(
+            json.contains("\"type\":\"offer_received\""),
+            "missing type field: {json}"
+        );
+        assert!(
+            json.contains("\"inscription_id\":\"ghi789i0\""),
+            "missing inscription_id: {json}"
+        );
+        assert!(
+            json.contains("\"price_sats\":75000"),
+            "missing price_sats: {json}"
+        );
+        assert!(
+            json.contains("\"buyer\":\"bc1qofferer\""),
+            "missing buyer: {json}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -267,14 +298,20 @@ mod tests {
             inscription_id: Some("match_me_i0".to_string()),
             collection_id: None,
         });
-        assert!(event_matches(&event, &filter), "expected match on inscription_id");
+        assert!(
+            event_matches(&event, &filter),
+            "expected match on inscription_id"
+        );
 
         // Filter with a different inscription_id — should NOT match.
         let non_matching_filter = Some(WsSubscribe {
             inscription_id: Some("other_id_i0".to_string()),
             collection_id: None,
         });
-        assert!(!event_matches(&event, &non_matching_filter), "expected no match for different inscription_id");
+        assert!(
+            !event_matches(&event, &non_matching_filter),
+            "expected no match for different inscription_id"
+        );
     }
 
     #[test]
@@ -287,7 +324,10 @@ mod tests {
         };
 
         // No filter at all — should always match.
-        assert!(event_matches(&event, &None), "expected match when filter is None");
+        assert!(
+            event_matches(&event, &None),
+            "expected match when filter is None"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -316,6 +356,9 @@ mod tests {
         // gives us a reliable structural comparison).
         let sent_json = serde_json::to_string(&event).unwrap();
         let recv_json = serde_json::to_string(&received).unwrap();
-        assert_eq!(sent_json, recv_json, "received event differs from sent event");
+        assert_eq!(
+            sent_json, recv_json,
+            "received event differs from sent event"
+        );
     }
 }

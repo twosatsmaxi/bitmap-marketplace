@@ -1,3 +1,7 @@
+use crate::{
+    errors::{AppError, AppResult},
+    AppState,
+};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -5,7 +9,6 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use crate::{errors::{AppError, AppResult}, AppState};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -18,7 +21,11 @@ async fn get_inscription(
     State(state): State<AppState>,
     Path(inscription_id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let inscription = state.db.get_inscription(&inscription_id).await.map_err(AppError::Internal)?;
+    let inscription = state
+        .db
+        .get_inscription(&inscription_id)
+        .await
+        .map_err(AppError::Internal)?;
     match inscription {
         Some(i) => Ok(Json(serde_json::json!(i))),
         None => Err(AppError::NotFound("Inscription not found".to_string())),
@@ -29,7 +36,8 @@ async fn get_inscription_history(
     State(state): State<AppState>,
     Path(inscription_id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let activity = state.db
+    let activity = state
+        .db
         .get_activity_by_inscription(&inscription_id, 50, 0)
         .await
         .map_err(AppError::Internal)?;

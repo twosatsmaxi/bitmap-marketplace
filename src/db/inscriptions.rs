@@ -1,12 +1,12 @@
-use crate::models::inscription::Inscription;
 use super::Database;
+use crate::models::inscription::Inscription;
 use anyhow::Result;
 use uuid::Uuid;
 
 impl Database {
     pub async fn get_inscription(&self, inscription_id: &str) -> Result<Option<Inscription>> {
         let inscription = sqlx::query_as::<_, Inscription>(
-            "SELECT * FROM inscriptions WHERE inscription_id = $1"
+            "SELECT * FROM inscriptions WHERE inscription_id = $1",
         )
         .bind(inscription_id)
         .fetch_optional(&self.pool)
@@ -14,7 +14,12 @@ impl Database {
         Ok(inscription)
     }
 
-    pub async fn get_inscriptions_by_collection(&self, collection_id: Uuid, limit: i64, offset: i64) -> Result<Vec<Inscription>> {
+    pub async fn get_inscriptions_by_collection(
+        &self,
+        collection_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Inscription>> {
         let inscriptions = sqlx::query_as::<_, Inscription>(
             "SELECT * FROM inscriptions WHERE collection_id = $1 ORDER BY inscription_number ASC LIMIT $2 OFFSET $3"
         )
@@ -28,7 +33,7 @@ impl Database {
 
     pub async fn get_inscriptions_by_owner(&self, owner_address: &str) -> Result<Vec<Inscription>> {
         let inscriptions = sqlx::query_as::<_, Inscription>(
-            "SELECT * FROM inscriptions WHERE owner_address = $1 ORDER BY created_at DESC"
+            "SELECT * FROM inscriptions WHERE owner_address = $1 ORDER BY created_at DESC",
         )
         .bind(owner_address)
         .fetch_all(&self.pool)
@@ -49,7 +54,7 @@ impl Database {
                 collection_id = EXCLUDED.collection_id,
                 updated_at = NOW()
             RETURNING *
-            "#
+            "#,
         )
         .bind(inscription.id)
         .bind(&inscription.inscription_id)
