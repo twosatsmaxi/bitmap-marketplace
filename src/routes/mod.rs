@@ -1,8 +1,9 @@
-use axum::Router;
 use crate::AppState;
+use axum::Router;
 
 mod activity;
 mod collections;
+mod explore;
 mod inscriptions;
 mod listings;
 mod offers;
@@ -12,6 +13,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .nest("/activity", activity::router())
         .nest("/collections", collections::router())
+        .nest("/explore", explore::router())
         .nest("/inscriptions", inscriptions::router())
         .nest("/listings", listings::router())
         .nest("/offers", offers::router())
