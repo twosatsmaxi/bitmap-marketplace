@@ -29,6 +29,7 @@ pub struct AppState {
     pub ws_broadcaster: Arc<ws::WsBroadcaster>,
     pub marketplace_keypair: Arc<MarketplaceKeypair>,
     pub http_client: reqwest::Client,
+    pub render_api_base: String,
 }
 
 #[tokio::main]
@@ -42,8 +43,12 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let db = Database::new().await?;
-    db.run_migrations().await?;
+    let db = Database::new()?;
+    match tokio::time::timeout(Duration::from_secs(5), db.run_migrations()).await {
+        Ok(Ok(())) => tracing::info!("DB migrations applied successfully"),
+        Ok(Err(e)) => tracing::warn!("DB migrations skipped (migration error): {e}"),
+        Err(_) => tracing::warn!("DB migrations skipped (connection timed out)"),
+    }
 
     // Spawn background services
     {
@@ -72,11 +77,15 @@ async fn main() -> Result<()> {
     let marketplace_keypair = MarketplaceKeypair::from_env()
         .expect("MarketplaceKeypair: failed to load from env (check MARKETPLACE_SECRET_KEY)");
 
+    let render_api_base = std::env::var("RENDER_API_BASE")
+        .unwrap_or_else(|_| "http://r2d2.local:3020".to_string());
+
     let state = AppState {
         db,
         ws_broadcaster: ws_broadcaster.clone(),
         marketplace_keypair,
         http_client: reqwest::Client::new(),
+        render_api_base,
     };
 
     // Per-IP rate limiting config.

@@ -1,5 +1,7 @@
 use anyhow::Result;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::time::Duration;
 
 pub mod activity;
 pub mod collections;
@@ -14,10 +16,12 @@ pub struct Database {
 }
 
 impl Database {
-    pub async fn new() -> Result<Self> {
-        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    pub fn new() -> Result<Self> {
+        let url = std::env::var("DATABASE_URL").unwrap_or_default();
 
-        let pool = PgPool::connect(&url).await?;
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_lazy(&url)?;
         Ok(Self { pool })
     }
 
