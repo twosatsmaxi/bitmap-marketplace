@@ -1,7 +1,12 @@
 use crate::{
     errors::{AppError, AppResult},
     models::activity::{Activity, ActivityType},
+    models::listing::ListingStatus,
     models::offer::{Offer, OfferStatus},
+    models::sale::Sale,
+    services::psbt::{
+        apply_marketplace_signature, finalize_and_extract, finalize_multisig_and_extract,
+    },
     ws::WsEvent,
     AppState,
 };
@@ -32,8 +37,8 @@ struct CreateOfferRequest {
     inscription_id: String,
     buyer_address: String,
     price_sats: i64,
-    /// Optional PSBT the buyer has pre-signed at their offered price
-    psbt: Option<String>,
+    /// PSBT the buyer has pre-signed at their offered price
+    psbt: String,
     /// TTL in seconds (default 86400 = 24h)
     ttl_seconds: Option<i64>,
 }
@@ -55,7 +60,7 @@ async fn create_offer(
         buyer_address: req.buyer_address.clone(),
         price_sats: req.price_sats,
         status: OfferStatus::Pending,
-        psbt: req.psbt,
+        psbt: Some(req.psbt),
         expires_at: Some(expires_at),
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -72,7 +77,7 @@ async fn create_offer(
         id: Uuid::new_v4(),
         inscription_id: req.inscription_id.clone(),
         collection_id: None,
-        activity_type: ActivityType::List, // closest available; offer-specific type TBD
+        activity_type: ActivityType::Offer,
         from_address: Some(req.buyer_address.clone()),
         to_address: None,
         price_sats: Some(req.price_sats),
@@ -115,48 +120,162 @@ async fn accept_offer(
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound("Offer not found".into()))?;
 
-    if offer.status != OfferStatus::Pending {
-        return Err(AppError::BadRequest(format!(
-            "Offer is not pending (status: {:?})",
-            offer.status
-        )));
-    }
-
-    // Check expiry
-    if let Some(exp) = offer.expires_at {
-        if Utc::now() > exp {
+    let signed_psbt = match validate_offer_for_acceptance(&offer, Utc::now())? {
+        OfferAcceptanceCheck::Expired => {
             let _ = state.db.update_offer_status(id, OfferStatus::Expired).await;
             return Err(AppError::BadRequest("Offer has expired".into()));
         }
-    }
+        OfferAcceptanceCheck::Ready(psbt) => psbt,
+    };
 
-    state
+    // Look up active listing for this inscription
+    let listing = state
         .db
-        .update_offer_status(id, OfferStatus::Accepted)
+        .get_active_listing_by_inscription(&offer.inscription_id)
         .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound("No active listing found for this inscription".into()))?;
+
+    let rpc = crate::services::bitcoin_rpc::BitcoinRpc::new().map_err(AppError::Internal)?;
+
+    // Broadcast based on protection status
+    let (sale_tx_id, locking_tx_id) = if listing.protection_status == "active" {
+        // Protected flow: apply marketplace co-sig, finalize P2WSH, broadcast package
+        let locking_raw_tx = listing
+            .locking_raw_tx
+            .as_ref()
+            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("missing locking_raw_tx")))?;
+        let seller_pubkey = listing
+            .seller_pubkey
+            .as_ref()
+            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("missing seller_pubkey")))?;
+
+        let cosigned_psbt = apply_marketplace_signature(signed_psbt, &state.marketplace_keypair)
+            .map_err(AppError::Internal)?;
+
+        let sale_raw_tx = finalize_multisig_and_extract(
+            &cosigned_psbt,
+            seller_pubkey,
+            &state.marketplace_keypair.pubkey_hex(),
+        )
         .map_err(AppError::Internal)?;
 
-    // Activity
+        let txids = rpc
+            .submit_package(&[locking_raw_tx, &sale_raw_tx])
+            .map_err(AppError::Internal)?;
+
+        let sale_txid = txids
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        let lock_txid = txids.first().cloned();
+
+        (sale_txid, lock_txid)
+    } else {
+        // Unprotected flow: finalize and broadcast
+        let raw_tx = finalize_and_extract(signed_psbt).map_err(AppError::Internal)?;
+        let tx_id = rpc
+            .broadcast_transaction(&raw_tx)
+            .map_err(AppError::Internal)?;
+        (tx_id, None)
+    };
+
+    // All DB writes in a transaction
+    let mut tx = state.db.pool.begin().await.map_err(AppError::Database)?;
+
+    // Accept the offer
+    sqlx::query("UPDATE offers SET status = $1, updated_at = NOW() WHERE id = $2")
+        .bind(OfferStatus::Accepted)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+    // Update listing to sold
+    sqlx::query("UPDATE listings SET status = $1, updated_at = NOW() WHERE id = $2")
+        .bind(ListingStatus::Sold)
+        .bind(listing.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+    // Create sale record
+    let sale = Sale {
+        id: Uuid::new_v4(),
+        listing_id: Some(listing.id),
+        inscription_id: offer.inscription_id.clone(),
+        seller_address: listing.seller_address.clone(),
+        buyer_address: offer.buyer_address.clone(),
+        price_sats: offer.price_sats,
+        royalty_sats: 0,
+        tx_id: Some(sale_tx_id.clone()),
+        locking_tx_id: locking_tx_id.clone(),
+        block_height: None,
+        confirmed_at: None,
+        created_at: Utc::now(),
+    };
+    sqlx::query(
+        r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, royalty_sats, tx_id, locking_tx_id, block_height, confirmed_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+    )
+    .bind(sale.id)
+    .bind(sale.listing_id)
+    .bind(&sale.inscription_id)
+    .bind(&sale.seller_address)
+    .bind(&sale.buyer_address)
+    .bind(sale.price_sats)
+    .bind(sale.royalty_sats)
+    .bind(&sale.tx_id)
+    .bind(&sale.locking_tx_id)
+    .bind(sale.block_height)
+    .bind(sale.confirmed_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    // Update inscription ownership
+    sqlx::query(
+        "UPDATE inscriptions SET owner_address = $1, updated_at = NOW() WHERE inscription_id = $2",
+    )
+    .bind(&offer.buyer_address)
+    .bind(&offer.inscription_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    // Cancel other pending offers on the same inscription
+    sqlx::query(
+        "UPDATE offers SET status = 'cancelled', updated_at = NOW() WHERE inscription_id = $1 AND id != $2 AND status = 'pending'",
+    )
+    .bind(&offer.inscription_id)
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    tx.commit().await.map_err(AppError::Database)?;
+
+    // Activity log (best-effort, outside transaction)
     let activity = Activity {
         id: Uuid::new_v4(),
         inscription_id: offer.inscription_id.clone(),
         collection_id: None,
         activity_type: ActivityType::Sale,
-        from_address: None,
+        from_address: Some(listing.seller_address.clone()),
         to_address: Some(offer.buyer_address.clone()),
         price_sats: Some(offer.price_sats),
-        tx_id: None,
+        tx_id: Some(sale_tx_id.clone()),
         block_height: None,
         created_at: Utc::now(),
     };
     let _ = state.db.create_activity(&activity).await;
 
-    // Broadcast sale confirmed
+    // Broadcast WS
     state.ws_broadcaster.send(WsEvent::SaleConfirmed {
         inscription_id: offer.inscription_id.clone(),
         price_sats: offer.price_sats as u64,
         buyer: offer.buyer_address.clone(),
-        tx_id: "pending_broadcast".to_string(),
+        tx_id: sale_tx_id.clone(),
     });
 
     Ok(Json(serde_json::json!({
@@ -165,7 +284,116 @@ async fn accept_offer(
         "inscription_id": offer.inscription_id,
         "buyer_address": offer.buyer_address,
         "price_sats": offer.price_sats,
+        "tx_id": sale_tx_id,
     })))
+}
+
+#[derive(Debug)]
+enum OfferAcceptanceCheck<'a> {
+    Ready(&'a str),
+    Expired,
+}
+
+fn validate_offer_for_acceptance(
+    offer: &Offer,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<OfferAcceptanceCheck<'_>> {
+    if offer.status != OfferStatus::Pending {
+        return Err(AppError::BadRequest(format!(
+            "Offer is not pending (status: {:?})",
+            offer.status
+        )));
+    }
+
+    if let Some(exp) = offer.expires_at {
+        if now > exp {
+            return Ok(OfferAcceptanceCheck::Expired);
+        }
+    }
+
+    let signed_psbt = offer
+        .psbt
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("Offer has no PSBT".into()))?;
+
+    Ok(OfferAcceptanceCheck::Ready(signed_psbt))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_offer_for_acceptance, OfferAcceptanceCheck};
+    use crate::{
+        errors::AppError,
+        models::offer::{Offer, OfferStatus},
+    };
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    fn make_offer(status: OfferStatus, expires_at: Option<chrono::DateTime<Utc>>, psbt: Option<&str>) -> Offer {
+        let now = Utc::now();
+        Offer {
+            id: Uuid::new_v4(),
+            inscription_id: "inscription".to_string(),
+            buyer_address: "buyer".to_string(),
+            price_sats: 1_000,
+            status,
+            psbt: psbt.map(str::to_string),
+            expires_at,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn validate_offer_acceptance_rejects_non_pending_status() {
+        let offer = make_offer(OfferStatus::Accepted, None, Some("psbt"));
+
+        let err = validate_offer_for_acceptance(&offer, Utc::now()).unwrap_err();
+        match err {
+            AppError::BadRequest(message) => assert!(message.contains("not pending")),
+            other => panic!("expected bad request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_offer_acceptance_marks_expired_offer() {
+        let now = Utc::now();
+        let offer = make_offer(
+            OfferStatus::Pending,
+            Some(now - Duration::seconds(1)),
+            Some("psbt"),
+        );
+
+        let result = validate_offer_for_acceptance(&offer, now).unwrap();
+        assert!(matches!(result, OfferAcceptanceCheck::Expired));
+    }
+
+    #[test]
+    fn validate_offer_acceptance_requires_psbt() {
+        let offer = make_offer(OfferStatus::Pending, None, None);
+
+        let err = validate_offer_for_acceptance(&offer, Utc::now()).unwrap_err();
+        match err {
+            AppError::BadRequest(message) => assert!(message.contains("no PSBT")),
+            other => panic!("expected bad request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_offer_acceptance_returns_psbt_for_ready_offer() {
+        let now = Utc::now();
+        let offer = make_offer(
+            OfferStatus::Pending,
+            Some(now + Duration::seconds(30)),
+            Some("signed-psbt"),
+        );
+
+        let result = validate_offer_for_acceptance(&offer, now).unwrap();
+        match result {
+            OfferAcceptanceCheck::Ready(psbt) => assert_eq!(psbt, "signed-psbt"),
+            OfferAcceptanceCheck::Expired => panic!("expected ready offer"),
+        }
+    }
 }
 
 async fn cancel_offer(

@@ -20,6 +20,10 @@ impl Database {
         let url = std::env::var("DATABASE_URL").unwrap_or_default();
 
         let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .min_connections(2)
+            .idle_timeout(Duration::from_secs(300))
+            .max_lifetime(Duration::from_secs(1800))
             .acquire_timeout(Duration::from_secs(5))
             .connect_lazy(&url)?;
         Ok(Self { pool })

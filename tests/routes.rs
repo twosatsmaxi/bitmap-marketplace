@@ -47,6 +47,7 @@ async fn body_string(body: Body) -> String {
 enum TestAppError {
     NotFound(String),
     BadRequest(String),
+    Unauthorized(String),
     Internal(String),
 }
 
@@ -55,6 +56,7 @@ impl IntoResponse for TestAppError {
         let (status, message) = match &self {
             TestAppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             TestAppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            TestAppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             TestAppError::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
@@ -129,6 +131,26 @@ async fn app_error_internal_returns_500() {
     );
 }
 
+#[tokio::test]
+async fn app_error_unauthorized_returns_401() {
+    let error = TestAppError::Unauthorized("invalid API key".to_string());
+    let response = error.into_response();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "Unauthorized variant should produce HTTP 401"
+    );
+    let body = body_string(response.into_body()).await;
+    assert!(
+        body.contains("invalid API key"),
+        "Response body should contain the error message; got: {body}"
+    );
+    assert!(
+        body.contains("\"error\""),
+        "Response body should have an 'error' key; got: {body}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // AppError JSON shape test
 // ---------------------------------------------------------------------------
@@ -138,6 +160,7 @@ async fn app_error_response_is_valid_json() {
     let cases: Vec<TestAppError> = vec![
         TestAppError::NotFound("not found".to_string()),
         TestAppError::BadRequest("bad request".to_string()),
+        TestAppError::Unauthorized("unauthorized".to_string()),
         TestAppError::Internal("boom".to_string()),
     ];
 

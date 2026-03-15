@@ -1,6 +1,7 @@
 use super::Database;
 use crate::models::sale::Sale;
 use anyhow::Result;
+use chrono::Utc;
 use uuid::Uuid;
 
 impl Database {
@@ -10,6 +11,25 @@ impl Database {
             .fetch_optional(&self.pool)
             .await?;
         Ok(sale)
+    }
+
+    pub async fn get_pending_sales(&self) -> Result<Vec<Sale>> {
+        let sales = sqlx::query_as::<_, Sale>(
+            "SELECT * FROM sales WHERE tx_id IS NOT NULL AND confirmed_at IS NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(sales)
+    }
+
+    pub async fn confirm_sale(&self, id: Uuid, block_height: i64) -> Result<()> {
+        sqlx::query("UPDATE sales SET block_height = $1, confirmed_at = $2 WHERE id = $3")
+            .bind(block_height)
+            .bind(Utc::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn create_sale(&self, sale: &Sale) -> Result<Sale> {

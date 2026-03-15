@@ -21,7 +21,6 @@ use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/buy", post(buy))
-        .route("/offer", post(make_offer))
         .route("/confirm", post(confirm_order))
         .route("/:id", get(get_order))
 }
@@ -140,13 +139,6 @@ async fn buy(
     })))
 }
 
-async fn make_offer(
-    State(_state): State<AppState>,
-    Json(body): Json<serde_json::Value>,
-) -> AppResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({ "offer": body })))
-}
-
 #[derive(Deserialize)]
 struct ConfirmOrderRequest {
     listing_id: Uuid,
@@ -212,14 +204,16 @@ async fn confirm_order(
             .or(req.locking_txid)
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Mark listing sold.
-        state
-            .db
-            .update_listing_status(listing.id, crate::models::listing::ListingStatus::Sold)
-            .await
-            .map_err(AppError::Internal)?;
+        // Wrap all DB writes in a transaction for atomicity.
+        let mut tx = state.db.pool.begin().await.map_err(AppError::Database)?;
 
-        // Create Sale row.
+        sqlx::query("UPDATE listings SET status = $1, updated_at = NOW() WHERE id = $2")
+            .bind(crate::models::listing::ListingStatus::Sold)
+            .bind(listing.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+
         let sale = Sale {
             id: Uuid::new_v4(),
             listing_id: Some(listing.id),
@@ -234,11 +228,35 @@ async fn confirm_order(
             confirmed_at: None,
             created_at: chrono::Utc::now(),
         };
-        state
-            .db
-            .create_sale(&sale)
-            .await
-            .map_err(AppError::Internal)?;
+        sqlx::query(
+            r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, royalty_sats, tx_id, locking_tx_id, block_height, confirmed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+        )
+        .bind(sale.id)
+        .bind(sale.listing_id)
+        .bind(&sale.inscription_id)
+        .bind(&sale.seller_address)
+        .bind(&sale.buyer_address)
+        .bind(sale.price_sats)
+        .bind(sale.royalty_sats)
+        .bind(&sale.tx_id)
+        .bind(&sale.locking_tx_id)
+        .bind(sale.block_height)
+        .bind(sale.confirmed_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+        sqlx::query(
+            "UPDATE inscriptions SET owner_address = $1, updated_at = NOW() WHERE inscription_id = $2",
+        )
+        .bind(&buyer_address)
+        .bind(&listing.inscription_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+        tx.commit().await.map_err(AppError::Database)?;
 
         state.ws_broadcaster.send(WsEvent::SaleConfirmed {
             inscription_id: listing.inscription_id.clone(),
@@ -262,11 +280,15 @@ async fn confirm_order(
         .broadcast_transaction(&raw_tx)
         .map_err(|e| AppError::Internal(e))?;
 
-    state
-        .db
-        .update_listing_status(listing.id, crate::models::listing::ListingStatus::Sold)
+    // Wrap all DB writes in a transaction for atomicity.
+    let mut tx = state.db.pool.begin().await.map_err(AppError::Database)?;
+
+    sqlx::query("UPDATE listings SET status = $1, updated_at = NOW() WHERE id = $2")
+        .bind(crate::models::listing::ListingStatus::Sold)
+        .bind(listing.id)
+        .execute(&mut *tx)
         .await
-        .map_err(AppError::Internal)?;
+        .map_err(AppError::Database)?;
 
     let sale = Sale {
         id: Uuid::new_v4(),
@@ -282,11 +304,35 @@ async fn confirm_order(
         confirmed_at: None,
         created_at: chrono::Utc::now(),
     };
-    state
-        .db
-        .create_sale(&sale)
-        .await
-        .map_err(AppError::Internal)?;
+    sqlx::query(
+        r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, royalty_sats, tx_id, locking_tx_id, block_height, confirmed_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+    )
+    .bind(sale.id)
+    .bind(sale.listing_id)
+    .bind(&sale.inscription_id)
+    .bind(&sale.seller_address)
+    .bind(&sale.buyer_address)
+    .bind(sale.price_sats)
+    .bind(sale.royalty_sats)
+    .bind(&sale.tx_id)
+    .bind(&sale.locking_tx_id)
+    .bind(sale.block_height)
+    .bind(sale.confirmed_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    sqlx::query(
+        "UPDATE inscriptions SET owner_address = $1, updated_at = NOW() WHERE inscription_id = $2",
+    )
+    .bind(&buyer_address)
+    .bind(&listing.inscription_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    tx.commit().await.map_err(AppError::Database)?;
 
     state.ws_broadcaster.send(WsEvent::SaleConfirmed {
         inscription_id: listing.inscription_id.clone(),

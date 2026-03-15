@@ -71,6 +71,27 @@ async fn main() -> Result<()> {
             }
         });
     }
+    {
+        let db_clone = db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await;
+
+            loop {
+                interval.tick().await;
+
+                match db_clone.expire_stale_offers().await {
+                    Ok(expired_count) if expired_count > 0 => {
+                        tracing::info!("Expired {} stale offers", expired_count);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("Expired offer cleanup error: {}", e);
+                    }
+                }
+            }
+        });
+    }
 
     let ws_broadcaster = Arc::new(ws::WsBroadcaster::new());
 
