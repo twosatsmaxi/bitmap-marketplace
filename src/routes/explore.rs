@@ -1,5 +1,8 @@
 use axum::{
-    extract::{Query, State},
+    body::Body,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -8,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::{errors::AppError, AppState};
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/blocks", get(get_explore_blocks))
+    Router::new()
+        .route("/blocks", get(get_explore_blocks))
+        .route("/blocks/:height", get(proxy_block_data))
+        .route("/blocks/:height/meta", get(proxy_block_meta))
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,4 +138,71 @@ pub async fn get_explore_blocks(
         has_prev,
         total,
     }))
+}
+
+/// Proxy binary block data from the render API.
+async fn proxy_block_data(
+    State(state): State<AppState>,
+    Path(height): Path<u64>,
+) -> Result<Response, StatusCode> {
+    let url = format!("{}/api/block/{}", state.render_api_base, height);
+
+    let upstream = state
+        .http_client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    if !upstream.status().is_success() {
+        return Err(
+            StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY)
+        );
+    }
+
+    let bytes = upstream
+        .bytes()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "application/octet-stream".parse().unwrap());
+    headers.insert(
+        "cache-control",
+        "public, max-age=31536000, immutable".parse().unwrap(),
+    );
+
+    Ok((StatusCode::OK, headers, Body::from(bytes)).into_response())
+}
+
+/// Proxy JSON block metadata from the render API.
+async fn proxy_block_meta(
+    State(state): State<AppState>,
+    Path(height): Path<u64>,
+) -> Result<Response, StatusCode> {
+    let url = format!("{}/api/block/{}/meta", state.render_api_base, height);
+
+    let upstream = state
+        .http_client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    if !upstream.status().is_success() {
+        return Err(
+            StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY)
+        );
+    }
+
+    let bytes = upstream
+        .bytes()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    headers.insert("cache-control", "public, max-age=60".parse().unwrap());
+
+    Ok((StatusCode::OK, headers, Body::from(bytes)).into_response())
 }

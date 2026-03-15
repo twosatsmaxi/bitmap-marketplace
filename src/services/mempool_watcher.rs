@@ -48,12 +48,7 @@ impl MempoolWatcher {
             last_known_height = current_height;
 
             // Query all sales with tx_id set but not yet confirmed.
-            let pending_sales = match sqlx::query_as::<_, crate::models::sale::Sale>(
-                "SELECT * FROM sales WHERE tx_id IS NOT NULL AND confirmed_at IS NULL",
-            )
-            .fetch_all(&self.db.pool)
-            .await
-            {
+            let pending_sales = match self.db.get_pending_sales().await {
                 Ok(sales) => sales,
                 Err(e) => {
                     tracing::warn!("MempoolWatcher: failed to query pending sales: {}", e);
@@ -112,14 +107,7 @@ impl MempoolWatcher {
                 }
 
                 // --- Update sales table ---
-                if let Err(e) = sqlx::query(
-                    "UPDATE sales SET block_height = $1, confirmed_at = NOW() WHERE id = $2",
-                )
-                .bind(current_height as i64)
-                .bind(sale.id)
-                .execute(&self.db.pool)
-                .await
-                {
+                if let Err(e) = self.db.confirm_sale(sale.id, current_height as i64).await {
                     tracing::error!(
                         "MempoolWatcher: failed to update sale {} confirmation: {}",
                         sale.id,
@@ -145,13 +133,10 @@ impl MempoolWatcher {
                 }
 
                 // --- Update inscriptions table: set owner_address = buyer_address ---
-                if let Err(e) = sqlx::query(
-                    "UPDATE inscriptions SET owner_address = $1, updated_at = NOW() WHERE inscription_id = $2",
-                )
-                .bind(&sale.buyer_address)
-                .bind(&sale.inscription_id)
-                .execute(&self.db.pool)
-                .await
+                if let Err(e) = self
+                    .db
+                    .update_inscription_owner(&sale.inscription_id, &sale.buyer_address)
+                    .await
                 {
                     tracing::error!(
                         "MempoolWatcher: failed to update inscription owner for {}: {}",
@@ -161,16 +146,11 @@ impl MempoolWatcher {
                 }
 
                 // --- Fetch the listing's collection_id (best-effort) ---
-                let collection_id: Option<Uuid> = match sqlx::query_scalar::<_, Option<Uuid>>(
-                    "SELECT i.collection_id FROM inscriptions i WHERE i.inscription_id = $1",
-                )
-                .bind(&sale.inscription_id)
-                .fetch_optional(&self.db.pool)
-                .await
-                {
-                    Ok(Some(cid)) => cid,
-                    _ => None,
-                };
+                let collection_id: Option<Uuid> = self
+                    .db
+                    .get_collection_id_for_inscription(&sale.inscription_id)
+                    .await
+                    .unwrap_or(None);
 
                 // --- Insert into activity_feed: activity_type = sale ---
                 let activity = Activity {

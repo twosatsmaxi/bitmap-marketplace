@@ -1,144 +1,88 @@
-/// Unit tests for the PSBT service.
-/// These run without any network, DB, or wallet — pure construction logic only.
 use super::{
-    build_buy_psbt, build_listing_psbt, decode_psbt, encode_psbt, BuyRequest, ListingRequest,
+    build_buy_psbt, build_listing_psbt, build_locking_psbt, build_multisig_redeem_script,
+    build_protected_sale_psbt, decode_psbt, encode_psbt, finalize_locking_psbt,
+    finalize_multisig_and_extract, BuyRequest, ListingRequest, LockingPsbtRequest,
+    ProtectedSalePsbtRequest, SpendableInput, WitnessUtxo, MIN_SELF_FUNDED,
 };
 use bitcoin::{
-    absolute::LockTime, psbt::Psbt, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
-    TxOut, Txid, Witness,
+    ecdsa, key::TapTweak, psbt::Psbt, secp256k1, sighash::SighashCache, taproot, Address, Amount,
+    Network, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
 use std::str::FromStr;
 
-/// A valid-looking but fake txid (all zeros except last byte).
 const FAKE_TXID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
-/// A valid regtest/mainnet bech32 address (P2WPKH on mainnet).
+const FAKE_TXID_2: &str = "0000000000000000000000000000000000000000000000000000000000000002";
 const SELLER_ADDR: &str = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
 const BUYER_ADDR: &str = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
 
-// ---------------------------------------------------------------------------
-// build_listing_psbt
-// ---------------------------------------------------------------------------
-
-#[test]
-fn listing_psbt_roundtrip() {
-    let req = ListingRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 0,
-        seller_address: SELLER_ADDR.to_string(),
-        price_sats: 1_000_000,
-    };
-    let result = build_listing_psbt(&req).unwrap();
-
-    // Round-trip through decode → encode should be stable.
-    let psbt = decode_psbt(&result.psbt_hex).unwrap();
-    let rehex = encode_psbt(&psbt);
-    assert_eq!(result.psbt_hex, rehex);
+fn secret_key(byte: u8) -> secp256k1::SecretKey {
+    secp256k1::SecretKey::from_slice(&[byte; 32]).unwrap()
 }
 
-#[test]
-fn listing_psbt_has_one_input_one_output() {
-    let req = ListingRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 2,
-        seller_address: SELLER_ADDR.to_string(),
-        price_sats: 500_000,
-    };
-    let result = build_listing_psbt(&req).unwrap();
-    let psbt = decode_psbt(&result.psbt_hex).unwrap();
-
-    assert_eq!(psbt.unsigned_tx.input.len(), 1, "exactly one input");
-    assert_eq!(psbt.unsigned_tx.output.len(), 1, "exactly one output");
+fn bitcoin_pubkey(secret_key: &secp256k1::SecretKey) -> bitcoin::PublicKey {
+    bitcoin::PublicKey {
+        compressed: true,
+        inner: secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), secret_key),
+    }
 }
 
-#[test]
-fn listing_psbt_output_value_matches_price() {
-    let price = 2_000_000u64;
-    let req = ListingRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 0,
-        seller_address: SELLER_ADDR.to_string(),
-        price_sats: price,
-    };
-    let result = build_listing_psbt(&req).unwrap();
-    let psbt = decode_psbt(&result.psbt_hex).unwrap();
-
-    let output_sats = psbt.unsigned_tx.output[0].value.to_sat();
-    assert_eq!(output_sats, price, "output value must equal price_sats");
+fn p2wpkh_script(secret_key: &secp256k1::SecretKey) -> ScriptBuf {
+    Address::p2wpkh(&bitcoin_pubkey(secret_key), Network::Bitcoin)
+        .unwrap()
+        .script_pubkey()
 }
 
-#[test]
-fn listing_psbt_input_references_correct_outpoint() {
-    let req = ListingRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 3,
-        seller_address: SELLER_ADDR.to_string(),
-        price_sats: 100_000,
-    };
-    let result = build_listing_psbt(&req).unwrap();
-    let psbt = decode_psbt(&result.psbt_hex).unwrap();
-
-    let input = &psbt.unsigned_tx.input[0];
-    assert_eq!(
-        input.previous_output.txid.to_string(),
-        FAKE_TXID,
-        "input txid must match"
-    );
-    assert_eq!(input.previous_output.vout, 3, "input vout must match");
+fn p2sh_p2wpkh_scripts(secret_key: &secp256k1::SecretKey) -> (ScriptBuf, ScriptBuf) {
+    let pubkey = bitcoin_pubkey(secret_key);
+    let redeem_script = ScriptBuf::new_p2wpkh(&pubkey.wpubkey_hash().unwrap());
+    let script_pubkey = Address::p2shwpkh(&pubkey, Network::Bitcoin)
+        .unwrap()
+        .script_pubkey();
+    (script_pubkey, redeem_script)
 }
 
-#[test]
-fn listing_psbt_sighash_type_is_single_acp() {
-    let req = ListingRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 0,
-        seller_address: SELLER_ADDR.to_string(),
-        price_sats: 100_000,
-    };
-    let result = build_listing_psbt(&req).unwrap();
-    let psbt = decode_psbt(&result.psbt_hex).unwrap();
-
-    let sighash_type = psbt.inputs[0]
-        .sighash_type
-        .expect("sighash_type must be set on seller input");
-
-    let ecdsa = sighash_type
-        .ecdsa_hash_ty()
-        .expect("must be a valid ECDSA sighash type");
-
-    assert_eq!(
-        ecdsa,
-        bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
-        "seller input must use SIGHASH_SINGLE|ANYONECANPAY"
-    );
+fn p2tr_script(secret_key: &secp256k1::SecretKey) -> ScriptBuf {
+    let secp = secp256k1::Secp256k1::new();
+    let keypair = secp256k1::Keypair::from_secret_key(&secp, secret_key);
+    let (internal_key, _) = secp256k1::XOnlyPublicKey::from_keypair(&keypair);
+    let tweaked = internal_key.tap_tweak(&secp, None).0;
+    Address::p2tr_tweaked(tweaked, Network::Bitcoin).script_pubkey()
 }
 
-#[test]
-fn listing_psbt_invalid_txid_returns_error() {
-    let req = ListingRequest {
-        inscription_txid: "not-a-txid".to_string(),
-        inscription_vout: 0,
-        seller_address: SELLER_ADDR.to_string(),
-        price_sats: 100_000,
-    };
-    assert!(build_listing_psbt(&req).is_err());
+fn spendable_input(
+    txid: &str,
+    vout: u32,
+    value_sats: u64,
+    script_pubkey: ScriptBuf,
+) -> SpendableInput {
+    SpendableInput {
+        txid: txid.to_string(),
+        vout,
+        value_sats,
+        witness_utxo: WitnessUtxo {
+            script_pubkey_hex: hex::encode(script_pubkey.as_bytes()),
+            value_sats,
+        },
+        non_witness_utxo_hex: None,
+        redeem_script_hex: None,
+        witness_script_hex: None,
+        sequence: Some(Sequence::ENABLE_RBF_NO_LOCKTIME.0),
+    }
 }
 
-#[test]
-fn listing_psbt_invalid_address_returns_error() {
-    let req = ListingRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 0,
-        seller_address: "not-an-address".to_string(),
-        price_sats: 100_000,
-    };
-    assert!(build_listing_psbt(&req).is_err());
+fn wrapped_spendable_input(
+    txid: &str,
+    vout: u32,
+    value_sats: u64,
+    secret_key: &secp256k1::SecretKey,
+) -> SpendableInput {
+    let (script_pubkey, redeem_script) = p2sh_p2wpkh_scripts(secret_key);
+    SpendableInput {
+        redeem_script_hex: Some(hex::encode(redeem_script.as_bytes())),
+        ..spendable_input(txid, vout, value_sats, script_pubkey)
+    }
 }
 
-// ---------------------------------------------------------------------------
-// build_buy_psbt
-// ---------------------------------------------------------------------------
-
-/// Build a minimal seller PSBT hex to use as input for buy tests.
 fn make_seller_psbt_hex(price_sats: u64) -> String {
     let req = ListingRequest {
         inscription_txid: FAKE_TXID.to_string(),
@@ -149,356 +93,393 @@ fn make_seller_psbt_hex(price_sats: u64) -> String {
     build_listing_psbt(&req).unwrap().psbt_hex
 }
 
-#[test]
-fn buy_psbt_has_two_inputs_three_outputs() {
-    let price = 500_000u64;
-    let seller_hex = make_seller_psbt_hex(price);
-    let req = BuyRequest {
-        seller_psbt_hex: seller_hex,
-        buyer_address: BUYER_ADDR.to_string(),
-        buyer_utxo_txid: FAKE_TXID.to_string(),
-        buyer_utxo_vout: 1,
-        buyer_utxo_amount_sats: 1_000_000,
-        fee_rate_sat_vb: 10.0,
+fn build_locking_fixture_psbt(input: SpendableInput) -> String {
+    let tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: bitcoin::OutPoint::new(FAKE_TXID.parse().unwrap(), 0),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::default(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(input.value_sats - 1000),
+            script_pubkey: Address::from_str(BUYER_ADDR)
+                .unwrap()
+                .assume_checked()
+                .script_pubkey(),
+        }],
     };
-    let result = build_buy_psbt(&req).unwrap();
+    let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+    psbt.inputs[0].witness_utxo = Some(TxOut {
+        value: Amount::from_sat(input.value_sats),
+        script_pubkey: ScriptBuf::from_bytes(
+            hex::decode(&input.witness_utxo.script_pubkey_hex).unwrap(),
+        ),
+    });
+    if let Some(redeem_script_hex) = input.redeem_script_hex {
+        psbt.inputs[0].redeem_script = Some(ScriptBuf::from_bytes(
+            hex::decode(redeem_script_hex).unwrap(),
+        ));
+    }
+    encode_psbt(&psbt)
+}
+
+fn sign_p2wpkh_input(psbt: &mut Psbt, input_index: usize, secret_key: &secp256k1::SecretKey) {
+    let secp = secp256k1::Secp256k1::new();
+    let public_key = bitcoin_pubkey(secret_key);
+    let witness_utxo = psbt.inputs[input_index].witness_utxo.clone().unwrap();
+    let script = if let Some(redeem_script) = psbt.inputs[input_index].redeem_script.clone() {
+        redeem_script
+    } else {
+        witness_utxo.script_pubkey.clone()
+    };
+    let sighash = SighashCache::new(&psbt.unsigned_tx)
+        .p2wpkh_signature_hash(
+            input_index,
+            &script,
+            witness_utxo.value,
+            bitcoin::EcdsaSighashType::All,
+        )
+        .unwrap();
+    let msg = secp256k1::Message::from(sighash);
+    let sig = secp.sign_ecdsa(&msg, secret_key);
+    psbt.inputs[input_index].partial_sigs.insert(
+        public_key,
+        ecdsa::Signature {
+            sig,
+            hash_ty: bitcoin::EcdsaSighashType::All,
+        },
+    );
+}
+
+#[test]
+fn listing_psbt_roundtrip() {
+    let req = ListingRequest {
+        inscription_txid: FAKE_TXID.to_string(),
+        inscription_vout: 0,
+        seller_address: SELLER_ADDR.to_string(),
+        price_sats: 1_000_000,
+    };
+    let result = build_listing_psbt(&req).unwrap();
+    let psbt = decode_psbt(&result.psbt_hex).unwrap();
+    assert_eq!(result.psbt_hex, encode_psbt(&psbt));
+}
+
+#[test]
+fn buy_psbt_populates_real_buyer_prevout_metadata() {
+    let price = 500_000u64;
+    let buyer_input = spendable_input(FAKE_TXID_2, 1, 1_000_000, p2wpkh_script(&secret_key(3)));
+
+    let result = build_buy_psbt(&BuyRequest {
+        seller_psbt_hex: make_seller_psbt_hex(price),
+        buyer_address: BUYER_ADDR.to_string(),
+        buyer_funding_input: buyer_input.clone(),
+        fee_rate_sat_vb: 10.0,
+    })
+    .unwrap();
     let psbt = decode_psbt(&result.psbt_hex).unwrap();
 
-    assert_eq!(psbt.unsigned_tx.input.len(), 2, "2 inputs: seller + buyer");
     assert_eq!(
-        psbt.unsigned_tx.output.len(),
-        3,
-        "3 outputs: payment + dust + change"
+        psbt.inputs[1].witness_utxo.as_ref().unwrap().value.to_sat(),
+        buyer_input.value_sats
     );
+    assert!(!psbt.inputs[1]
+        .witness_utxo
+        .as_ref()
+        .unwrap()
+        .script_pubkey
+        .is_empty());
 }
 
 #[test]
-fn buy_psbt_output0_is_price_to_seller() {
-    let price = 500_000u64;
-    let seller_hex = make_seller_psbt_hex(price);
-    let req = BuyRequest {
-        seller_psbt_hex: seller_hex,
+fn buy_psbt_rejects_wrapped_segwit_without_redeem_script() {
+    let secret_key = secret_key(4);
+    let (script_pubkey, _) = p2sh_p2wpkh_scripts(&secret_key);
+    let buyer_input = spendable_input(FAKE_TXID_2, 1, 1_000_000, script_pubkey);
+
+    let err = build_buy_psbt(&BuyRequest {
+        seller_psbt_hex: make_seller_psbt_hex(500_000),
         buyer_address: BUYER_ADDR.to_string(),
-        buyer_utxo_txid: FAKE_TXID.to_string(),
-        buyer_utxo_vout: 1,
-        buyer_utxo_amount_sats: 1_000_000,
+        buyer_funding_input: buyer_input,
         fee_rate_sat_vb: 10.0,
+    })
+    .unwrap_err();
+
+    assert!(err.to_string().contains("redeem_script_hex"));
+}
+
+#[test]
+fn locking_psbt_populates_real_funding_metadata() {
+    let inscription_input = spendable_input(
+        FAKE_TXID,
+        0,
+        MIN_SELF_FUNDED + 100,
+        p2wpkh_script(&secret_key(5)),
+    );
+    let req = LockingPsbtRequest {
+        inscription_input: inscription_input.clone(),
+        gas_funding_input: None,
+        seller_pubkey_hex: bitcoin_pubkey(&secret_key(6)).to_string(),
+        marketplace_pubkey_hex: bitcoin_pubkey(&secret_key(7)).to_string(),
+        network: Network::Bitcoin,
+        min_relay_fee_rate_sat_vb: None,
     };
-    let result = build_buy_psbt(&req).unwrap();
+
+    let result = build_locking_psbt(&req).unwrap();
     let psbt = decode_psbt(&result.psbt_hex).unwrap();
 
+    assert_eq!(psbt.inputs.len(), 1);
     assert_eq!(
-        psbt.unsigned_tx.output[0].value.to_sat(),
-        price,
-        "output 0 must equal the listing price"
+        psbt.inputs[0].witness_utxo.as_ref().unwrap().value.to_sat(),
+        inscription_input.value_sats
     );
+    assert!(psbt.inputs[0].witness_script.is_none());
 }
 
 #[test]
-fn buy_psbt_output1_is_inscription_dust() {
-    let price = 500_000u64;
-    let seller_hex = make_seller_psbt_hex(price);
-    let req = BuyRequest {
-        seller_psbt_hex: seller_hex,
-        buyer_address: BUYER_ADDR.to_string(),
-        buyer_utxo_txid: FAKE_TXID.to_string(),
-        buyer_utxo_vout: 1,
-        buyer_utxo_amount_sats: 1_000_000,
-        fee_rate_sat_vb: 10.0,
+fn locking_psbt_requires_gas_below_threshold() {
+    let req = LockingPsbtRequest {
+        inscription_input: spendable_input(
+            FAKE_TXID,
+            0,
+            MIN_SELF_FUNDED - 1,
+            p2wpkh_script(&secret_key(8)),
+        ),
+        gas_funding_input: None,
+        seller_pubkey_hex: bitcoin_pubkey(&secret_key(9)).to_string(),
+        marketplace_pubkey_hex: bitcoin_pubkey(&secret_key(10)).to_string(),
+        network: Network::Bitcoin,
+        min_relay_fee_rate_sat_vb: None,
     };
-    let result = build_buy_psbt(&req).unwrap();
-    let psbt = decode_psbt(&result.psbt_hex).unwrap();
 
-    assert_eq!(
-        psbt.unsigned_tx.output[1].value.to_sat(),
-        546,
-        "output 1 must be the 546-sat inscription dust"
-    );
+    let err = build_locking_psbt(&req).unwrap_err();
+    assert!(err.to_string().contains("gas_funding_input"));
 }
 
 #[test]
-fn buy_psbt_change_output_is_correct() {
-    let price = 500_000u64;
-    let buyer_utxo = 1_000_000u64;
-    let fee_rate = 10.0f64;
-    let seller_hex = make_seller_psbt_hex(price);
-
-    let req = BuyRequest {
-        seller_psbt_hex: seller_hex,
-        buyer_address: BUYER_ADDR.to_string(),
-        buyer_utxo_txid: FAKE_TXID.to_string(),
-        buyer_utxo_vout: 1,
-        buyer_utxo_amount_sats: buyer_utxo,
-        fee_rate_sat_vb: fee_rate,
+fn locking_psbt_rejects_insufficient_gas_funding() {
+    let req = LockingPsbtRequest {
+        inscription_input: spendable_input(FAKE_TXID, 0, 200, p2wpkh_script(&secret_key(11))),
+        gas_funding_input: Some(spendable_input(
+            FAKE_TXID_2,
+            1,
+            5,
+            p2wpkh_script(&secret_key(12)),
+        )),
+        seller_pubkey_hex: bitcoin_pubkey(&secret_key(13)).to_string(),
+        marketplace_pubkey_hex: bitcoin_pubkey(&secret_key(14)).to_string(),
+        network: Network::Bitcoin,
+        min_relay_fee_rate_sat_vb: Some(1.0),
     };
-    let result = build_buy_psbt(&req).unwrap();
-    let psbt = decode_psbt(&result.psbt_hex).unwrap();
 
-    // Manually compute the expected change.
-    // estimate_tx_vbytes(2, 3) = 10 + 41*2 + 31*3 = 10 + 82 + 93 = 185
-    let expected_fee = (185.0 * fee_rate) as u64; // 1850
-    let expected_change = buyer_utxo - price - 546 - expected_fee;
-
-    assert_eq!(
-        psbt.unsigned_tx.output[2].value.to_sat(),
-        expected_change,
-        "output 2 must be the correct change"
-    );
-    assert_eq!(
-        result.estimated_fee_sats, expected_fee,
-        "reported fee must match"
-    );
+    let err = build_locking_psbt(&req).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("gas_funding_input requires at least"));
 }
 
 #[test]
-fn buy_psbt_insufficient_funds_returns_error() {
-    let price = 500_000u64;
-    let seller_hex = make_seller_psbt_hex(price);
-    let req = BuyRequest {
-        seller_psbt_hex: seller_hex,
-        buyer_address: BUYER_ADDR.to_string(),
-        buyer_utxo_txid: FAKE_TXID.to_string(),
-        buyer_utxo_vout: 1,
-        buyer_utxo_amount_sats: 400_000, // less than price alone
-        fee_rate_sat_vb: 10.0,
+fn protected_sale_psbt_populates_multisig_and_buyer_metadata() {
+    let seller_secret = secret_key(15);
+    let marketplace_secret = secret_key(16);
+    let seller_pubkey = bitcoin_pubkey(&seller_secret);
+    let marketplace_pubkey = bitcoin_pubkey(&marketplace_secret);
+    let witness_script =
+        build_multisig_redeem_script(&seller_pubkey.inner, &marketplace_pubkey.inner);
+    let multisig_address = Address::p2wsh(&witness_script, Network::Bitcoin);
+    let locking_tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: bitcoin::OutPoint::new(FAKE_TXID.parse().unwrap(), 0),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::default(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(10_000),
+            script_pubkey: multisig_address.script_pubkey(),
+        }],
     };
-    assert!(
-        build_buy_psbt(&req).is_err(),
-        "insufficient funds must return error"
-    );
-}
+    let buyer_input = spendable_input(FAKE_TXID_2, 1, 100_000, p2wpkh_script(&secret_key(17)));
 
-#[test]
-fn buy_psbt_invalid_seller_psbt_returns_error() {
-    let req = BuyRequest {
-        seller_psbt_hex: "deadbeef".to_string(),
+    let result = build_protected_sale_psbt(&ProtectedSalePsbtRequest {
+        locking_raw_tx_hex: hex::encode(bitcoin::consensus::encode::serialize(&locking_tx)),
+        multisig_vout: 0,
+        multisig_script_hex: hex::encode(witness_script.as_bytes()),
+        seller_address: SELLER_ADDR.to_string(),
+        price_sats: 50_000,
         buyer_address: BUYER_ADDR.to_string(),
-        buyer_utxo_txid: FAKE_TXID.to_string(),
-        buyer_utxo_vout: 0,
-        buyer_utxo_amount_sats: 1_000_000,
-        fee_rate_sat_vb: 10.0,
-    };
-    assert!(build_buy_psbt(&req).is_err());
-}
-
-#[test]
-fn buy_psbt_roundtrip_decode_encode() {
-    let price = 300_000u64;
-    let seller_hex = make_seller_psbt_hex(price);
-    let req = BuyRequest {
-        seller_psbt_hex: seller_hex,
-        buyer_address: BUYER_ADDR.to_string(),
-        buyer_utxo_txid: FAKE_TXID.to_string(),
-        buyer_utxo_vout: 0,
-        buyer_utxo_amount_sats: 1_000_000,
+        buyer_funding_input: buyer_input.clone(),
         fee_rate_sat_vb: 5.0,
-    };
-    let result = build_buy_psbt(&req).unwrap();
+    })
+    .unwrap();
     let psbt = decode_psbt(&result.psbt_hex).unwrap();
-    let rehex = encode_psbt(&psbt);
-    assert_eq!(result.psbt_hex, rehex);
-}
 
-// ---------------------------------------------------------------------------
-// decode_psbt / encode_psbt helpers
-// ---------------------------------------------------------------------------
-
-#[test]
-fn decode_invalid_hex_returns_error() {
-    assert!(decode_psbt("gg").is_err());
-}
-
-#[test]
-fn decode_invalid_psbt_bytes_returns_error() {
-    // Valid hex but not a PSBT.
-    assert!(decode_psbt("deadbeef").is_err());
-}
-
-// ---------------------------------------------------------------------------
-// Mempool protection: build_locking_psbt
-// ---------------------------------------------------------------------------
-
-use super::{
-    build_locking_psbt, build_multisig_redeem_script, p2wsh_address, LockingPsbtRequest,
-    DEFAULT_LOCKING_TX_FEE_SATS, MIN_SELF_FUNDED,
-};
-use bitcoin::secp256k1::{Secp256k1, SecretKey};
-use bitcoin::Network;
-
-/// Generate a deterministic secp256k1 keypair from a seed byte.
-fn make_keypair(seed: u8) -> (SecretKey, bitcoin::secp256k1::PublicKey) {
-    let secp = Secp256k1::new();
-    let mut key_bytes = [0u8; 32];
-    key_bytes[31] = seed;
-    let sk = SecretKey::from_slice(&key_bytes).unwrap();
-    let pk = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk);
-    (sk, pk)
-}
-
-fn seller_pk_hex() -> String {
-    let (_, pk) = make_keypair(1);
-    hex::encode(pk.serialize())
-}
-
-fn marketplace_pk_hex() -> String {
-    let (_, pk) = make_keypair(2);
-    hex::encode(pk.serialize())
-}
-
-#[test]
-fn locking_psbt_roundtrip() {
-    let req = LockingPsbtRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 0,
-        inscription_amount_sats: MIN_SELF_FUNDED + 100,
-        seller_pubkey_hex: seller_pk_hex(),
-        marketplace_pubkey_hex: marketplace_pk_hex(),
-        network: Network::Bitcoin,
-        fee_rate_sat_vb: None,
-        gas_txid: None,
-        gas_vout: None,
-        gas_amount_sats: None,
-    };
-    let result = build_locking_psbt(&req).unwrap();
-    let psbt = decode_psbt(&result.psbt_hex).unwrap();
-    let rehex = encode_psbt(&psbt);
-    assert_eq!(result.psbt_hex, rehex);
-}
-
-#[test]
-fn locking_psbt_has_one_input_one_output() {
-    let req = LockingPsbtRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 0,
-        inscription_amount_sats: 1000,
-        seller_pubkey_hex: seller_pk_hex(),
-        marketplace_pubkey_hex: marketplace_pk_hex(),
-        network: Network::Bitcoin,
-        fee_rate_sat_vb: None,
-        gas_txid: None,
-        gas_vout: None,
-        gas_amount_sats: None,
-    };
-    let result = build_locking_psbt(&req).unwrap();
-    let psbt = decode_psbt(&result.psbt_hex).unwrap();
-    assert_eq!(psbt.unsigned_tx.input.len(), 1);
-    assert_eq!(psbt.unsigned_tx.output.len(), 1);
-}
-
-#[test]
-fn locking_psbt_output_is_multisig_address() {
-    let req = LockingPsbtRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 0,
-        inscription_amount_sats: 1000,
-        seller_pubkey_hex: seller_pk_hex(),
-        marketplace_pubkey_hex: marketplace_pk_hex(),
-        network: Network::Bitcoin,
-        fee_rate_sat_vb: None,
-        gas_txid: None,
-        gas_vout: None,
-        gas_amount_sats: None,
-    };
-    let result = build_locking_psbt(&req).unwrap();
-    assert!(!result.multisig_address.is_empty());
-    assert!(!result.multisig_script_hex.is_empty());
-    // Multisig address must be a P2WSH (bech32, starts with bc1q on mainnet, 62 chars).
-    assert!(
-        result.multisig_address.starts_with("bc1q"),
-        "must be P2WSH bech32"
-    );
-}
-
-#[test]
-fn locking_psbt_output_value_deducts_fee() {
-    let inscription_amount = 1000u64;
-    let req = LockingPsbtRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 0,
-        inscription_amount_sats: inscription_amount,
-        seller_pubkey_hex: seller_pk_hex(),
-        marketplace_pubkey_hex: marketplace_pk_hex(),
-        network: Network::Bitcoin,
-        fee_rate_sat_vb: None,
-        gas_txid: None,
-        gas_vout: None,
-        gas_amount_sats: None,
-    };
-    let result = build_locking_psbt(&req).unwrap();
-    let psbt = decode_psbt(&result.psbt_hex).unwrap();
-    let out_value = psbt.unsigned_tx.output[0].value.to_sat();
-    assert_eq!(out_value, inscription_amount - DEFAULT_LOCKING_TX_FEE_SATS);
-}
-
-#[test]
-fn locking_psbt_below_min_self_funded_returns_error() {
-    let req = LockingPsbtRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 0,
-        inscription_amount_sats: MIN_SELF_FUNDED - 1, // too small
-        seller_pubkey_hex: seller_pk_hex(),
-        marketplace_pubkey_hex: marketplace_pk_hex(),
-        network: Network::Bitcoin,
-        fee_rate_sat_vb: None,
-        gas_txid: None,
-        gas_vout: None,
-        gas_amount_sats: None,
-    };
-    assert!(build_locking_psbt(&req).is_err());
-}
-
-#[test]
-fn locking_psbt_with_gas_utxo_has_two_inputs() {
-    let req = LockingPsbtRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 0,
-        inscription_amount_sats: 546,
-        seller_pubkey_hex: seller_pk_hex(),
-        marketplace_pubkey_hex: marketplace_pk_hex(),
-        network: Network::Bitcoin,
-        fee_rate_sat_vb: None,
-        gas_txid: Some(FAKE_TXID.to_string()),
-        gas_vout: Some(1),
-        gas_amount_sats: Some(2000),
-    };
-    let result = build_locking_psbt(&req).unwrap();
-    let psbt = decode_psbt(&result.psbt_hex).unwrap();
     assert_eq!(
-        psbt.unsigned_tx.input.len(),
-        2,
-        "gas input adds a second input"
+        psbt.inputs[0].witness_script.as_ref().unwrap(),
+        &witness_script
     );
-}
-
-#[test]
-fn bip67_sort_is_deterministic() {
-    let (_, pk1) = make_keypair(1);
-    let (_, pk2) = make_keypair(2);
-    // Redeem script built with pk1+pk2 and pk2+pk1 in LockingPsbtRequest should produce same address.
-    let script_a = build_multisig_redeem_script(&pk1, &pk2);
-    let script_b = build_multisig_redeem_script(&pk2, &pk1);
     assert_eq!(
-        script_a, script_b,
-        "BIP-67 sort must produce same script regardless of key order"
+        psbt.inputs[1].witness_utxo.as_ref().unwrap().value.to_sat(),
+        buyer_input.value_sats
     );
-    let addr_a = p2wsh_address(&script_a, Network::Bitcoin);
-    let addr_b = p2wsh_address(&script_b, Network::Bitcoin);
-    assert_eq!(addr_a, addr_b, "same script must produce same address");
+    assert!(!psbt.inputs[1]
+        .witness_utxo
+        .as_ref()
+        .unwrap()
+        .script_pubkey
+        .is_empty());
 }
 
 #[test]
-fn locking_psbt_invalid_seller_pubkey_returns_error() {
-    let req = LockingPsbtRequest {
-        inscription_txid: FAKE_TXID.to_string(),
-        inscription_vout: 0,
-        inscription_amount_sats: 1000,
-        seller_pubkey_hex: "not-a-pubkey".to_string(),
-        marketplace_pubkey_hex: marketplace_pk_hex(),
-        network: Network::Bitcoin,
-        fee_rate_sat_vb: None,
-        gas_txid: None,
-        gas_vout: None,
-        gas_amount_sats: None,
+fn finalize_locking_psbt_supports_p2wpkh() {
+    let input = spendable_input(FAKE_TXID, 0, 100_000, p2wpkh_script(&secret_key(18)));
+    let mut psbt = decode_psbt(&build_locking_fixture_psbt(input)).unwrap();
+    sign_p2wpkh_input(&mut psbt, 0, &secret_key(18));
+
+    let raw_tx = finalize_locking_psbt(&encode_psbt(&psbt)).unwrap();
+    let tx: Transaction = bitcoin::consensus::deserialize(&hex::decode(raw_tx).unwrap()).unwrap();
+    assert_eq!(tx.input[0].witness.len(), 2);
+}
+
+#[test]
+fn finalize_locking_psbt_supports_wrapped_segwit() {
+    let input = wrapped_spendable_input(FAKE_TXID, 0, 100_000, &secret_key(19));
+    let mut psbt = decode_psbt(&build_locking_fixture_psbt(input)).unwrap();
+    sign_p2wpkh_input(&mut psbt, 0, &secret_key(19));
+
+    let raw_tx = finalize_locking_psbt(&encode_psbt(&psbt)).unwrap();
+    let tx: Transaction = bitcoin::consensus::deserialize(&hex::decode(raw_tx).unwrap()).unwrap();
+    assert_eq!(tx.input[0].witness.len(), 2);
+    assert!(!tx.input[0].script_sig.is_empty());
+}
+
+#[test]
+fn finalize_locking_psbt_supports_taproot_keypath() {
+    let input = spendable_input(FAKE_TXID, 0, 100_000, p2tr_script(&secret_key(20)));
+    let mut psbt = decode_psbt(&build_locking_fixture_psbt(input)).unwrap();
+    let secp = secp256k1::Secp256k1::new();
+    let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key(20));
+    let msg = secp256k1::Message::from_digest([21u8; 32]);
+    let sig = secp.sign_schnorr(&msg, &keypair);
+    psbt.inputs[0].tap_key_sig = Some(taproot::Signature {
+        sig,
+        hash_ty: bitcoin::sighash::TapSighashType::Default,
+    });
+
+    let raw_tx = finalize_locking_psbt(&encode_psbt(&psbt)).unwrap();
+    let tx: Transaction = bitcoin::consensus::deserialize(&hex::decode(raw_tx).unwrap()).unwrap();
+    assert_eq!(tx.input[0].witness.len(), 1);
+}
+
+#[test]
+fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
+    let secp = secp256k1::Secp256k1::new();
+    let seller_secret = secret_key(22);
+    let marketplace_secret = secret_key(23);
+    let buyer_secret = secret_key(24);
+    let seller_pubkey = bitcoin_pubkey(&seller_secret);
+    let marketplace_pubkey = bitcoin_pubkey(&marketplace_secret);
+    let buyer_pubkey = bitcoin_pubkey(&buyer_secret);
+    let witness_script =
+        build_multisig_redeem_script(&seller_pubkey.inner, &marketplace_pubkey.inner);
+    let locking_tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: bitcoin::OutPoint::new(FAKE_TXID.parse().unwrap(), 0),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::default(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: Address::p2wsh(&witness_script, Network::Bitcoin).script_pubkey(),
+        }],
     };
-    assert!(build_locking_psbt(&req).is_err());
+    let buyer_input = spendable_input(FAKE_TXID_2, 1, 200_000, p2wpkh_script(&buyer_secret));
+    let mut psbt = decode_psbt(
+        &build_protected_sale_psbt(&ProtectedSalePsbtRequest {
+            locking_raw_tx_hex: hex::encode(bitcoin::consensus::encode::serialize(&locking_tx)),
+            multisig_vout: 0,
+            multisig_script_hex: hex::encode(witness_script.as_bytes()),
+            seller_address: SELLER_ADDR.to_string(),
+            price_sats: 50_000,
+            buyer_address: BUYER_ADDR.to_string(),
+            buyer_funding_input: buyer_input,
+            fee_rate_sat_vb: 5.0,
+        })
+        .unwrap()
+        .psbt_hex,
+    )
+    .unwrap();
+
+    let seller_sighash = SighashCache::new(&psbt.unsigned_tx)
+        .p2wsh_signature_hash(
+            0,
+            &witness_script,
+            psbt.inputs[0].witness_utxo.as_ref().unwrap().value,
+            bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
+        )
+        .unwrap();
+    let seller_sig = secp.sign_ecdsa(&secp256k1::Message::from(seller_sighash), &seller_secret);
+    psbt.inputs[0].partial_sigs.insert(
+        seller_pubkey,
+        ecdsa::Signature {
+            sig: seller_sig,
+            hash_ty: bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
+        },
+    );
+
+    let marketplace_sighash = SighashCache::new(&psbt.unsigned_tx)
+        .p2wsh_signature_hash(
+            0,
+            &witness_script,
+            psbt.inputs[0].witness_utxo.as_ref().unwrap().value,
+            bitcoin::EcdsaSighashType::All,
+        )
+        .unwrap();
+    let marketplace_sig = secp.sign_ecdsa(
+        &secp256k1::Message::from(marketplace_sighash),
+        &marketplace_secret,
+    );
+    psbt.inputs[0].partial_sigs.insert(
+        marketplace_pubkey,
+        ecdsa::Signature {
+            sig: marketplace_sig,
+            hash_ty: bitcoin::EcdsaSighashType::All,
+        },
+    );
+
+    let buyer_witness_utxo = psbt.inputs[1].witness_utxo.clone().unwrap();
+    let buyer_sighash = SighashCache::new(&psbt.unsigned_tx)
+        .p2wpkh_signature_hash(
+            1,
+            &buyer_witness_utxo.script_pubkey,
+            buyer_witness_utxo.value,
+            bitcoin::EcdsaSighashType::All,
+        )
+        .unwrap();
+    let buyer_sig = secp.sign_ecdsa(&secp256k1::Message::from(buyer_sighash), &buyer_secret);
+    psbt.inputs[1].partial_sigs.insert(
+        buyer_pubkey,
+        ecdsa::Signature {
+            sig: buyer_sig,
+            hash_ty: bitcoin::EcdsaSighashType::All,
+        },
+    );
+
+    let raw_tx = finalize_multisig_and_extract(
+        &encode_psbt(&psbt),
+        &seller_pubkey.to_string(),
+        &marketplace_pubkey.to_string(),
+    )
+    .unwrap();
+    let tx: Transaction = bitcoin::consensus::deserialize(&hex::decode(raw_tx).unwrap()).unwrap();
+
+    assert_eq!(tx.input[0].witness.len(), 4);
+    assert_eq!(tx.input[1].witness.len(), 2);
 }

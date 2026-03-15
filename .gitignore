@@ -2,8 +2,8 @@
 # Dolt database files (added by bd init)
 .dolt/
 *.db
-
-
+bitmap_backup*
+.idea*
 # Added by cargo
 /target
 

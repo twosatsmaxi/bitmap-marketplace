@@ -36,6 +36,24 @@ pub struct Listing {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct WitnessUtxoRequest {
+    pub script_pubkey_hex: String,
+    pub value_sats: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SpendableInputRequest {
+    pub txid: String,
+    pub vout: u32,
+    pub value_sats: u64,
+    pub witness_utxo: WitnessUtxoRequest,
+    pub non_witness_utxo_hex: Option<String>,
+    pub redeem_script_hex: Option<String>,
+    pub witness_script_hex: Option<String>,
+    pub sequence: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateListingRequest {
     pub inscription_id: String,
     pub price_sats: i64,
@@ -44,14 +62,9 @@ pub struct CreateListingRequest {
     /// Optional compressed secp256k1 pubkey (hex) to enable mempool protection.
     pub seller_pubkey: Option<String>,
     /// Required when seller_pubkey is set.
-    pub inscription_txid: Option<String>,
-    pub inscription_vout: Option<u32>,
-    /// Inscription UTXO value in sats (for fee calculation).
-    pub inscription_amount_sats: Option<u64>,
-    /// Optional gas funding UTXO fields.
-    pub gas_txid: Option<String>,
-    pub gas_vout: Option<u32>,
-    pub gas_amount_sats: Option<u64>,
+    pub inscription_input: Option<SpendableInputRequest>,
+    /// Optional gas funding UTXO.
+    pub gas_funding_input: Option<SpendableInputRequest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,8 +72,6 @@ pub struct BuyListingRequest {
     pub listing_id: Uuid,
     pub buyer_address: String,
     pub signed_psbt: Option<String>,
-    pub buyer_utxo_txid: Option<String>,
-    pub buyer_utxo_vout: Option<u32>,
-    pub buyer_utxo_amount_sats: Option<u64>,
+    pub buyer_funding_input: Option<SpendableInputRequest>,
     pub fee_rate_sat_vb: Option<f64>,
 }

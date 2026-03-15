@@ -1,6 +1,8 @@
 use anyhow::Result;
 use axum::Router;
+use bitcoin::Network;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tower::limit::ConcurrencyLimitLayer;
@@ -29,6 +31,8 @@ pub struct AppState {
     pub ws_broadcaster: Arc<ws::WsBroadcaster>,
     pub marketplace_keypair: Arc<MarketplaceKeypair>,
     pub http_client: reqwest::Client,
+    pub render_api_base: String,
+    pub network: Network,
 }
 
 #[tokio::main]
@@ -42,10 +46,15 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let db = Database::new().await?;
-    db.run_migrations().await?;
+    let db = Database::new()?;
+    match tokio::time::timeout(Duration::from_secs(5), db.run_migrations()).await {
+        Ok(Ok(())) => tracing::info!("DB migrations applied successfully"),
+        Ok(Err(e)) => tracing::warn!("DB migrations skipped (migration error): {e}"),
+        Err(_) => tracing::warn!("DB migrations skipped (connection timed out)"),
+    }
 
-    // Spawn background services
+    // Spawn background services (disabled for now)
+    /*
     {
         let db_clone = db.clone();
         tokio::spawn(async move {
@@ -66,17 +75,48 @@ async fn main() -> Result<()> {
             }
         });
     }
+    {
+        let db_clone = db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await;
+
+            loop {
+                interval.tick().await;
+
+                match db_clone.expire_stale_offers().await {
+                    Ok(expired_count) if expired_count > 0 => {
+                        tracing::info!("Expired {} stale offers", expired_count);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("Expired offer cleanup error: {}", e);
+                    }
+                }
+            }
+        });
+    }
+    */
 
     let ws_broadcaster = Arc::new(ws::WsBroadcaster::new());
 
     let marketplace_keypair = MarketplaceKeypair::from_env()
         .expect("MarketplaceKeypair: failed to load from env (check MARKETPLACE_SECRET_KEY)");
+    let network = std::env::var("BITCOIN_NETWORK")
+        .ok()
+        .and_then(|value| Network::from_str(&value).ok())
+        .unwrap_or(Network::Regtest);
+
+    let render_api_base =
+        std::env::var("RENDER_API_BASE").unwrap_or_else(|_| "http://r2d2.local:3020".to_string());
 
     let state = AppState {
         db,
         ws_broadcaster: ws_broadcaster.clone(),
         marketplace_keypair,
         http_client: reqwest::Client::new(),
+        render_api_base,
+        network,
     };
 
     // Per-IP rate limiting config.

@@ -1,7 +1,24 @@
 use super::Database;
 use crate::models::listing::{Listing, ListingStatus};
 use anyhow::Result;
+use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListingSort {
+    CreatedAt,
+    PriceAsc,
+    PriceDesc,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ListingFilter {
+    pub collection_id: Option<Uuid>,
+    pub seller_address: Option<String>,
+    pub min_price_sats: Option<i64>,
+    pub max_price_sats: Option<i64>,
+    pub sort_by: Option<ListingSort>,
+}
 
 impl Database {
     pub async fn get_listing(&self, id: Uuid) -> Result<Option<Listing>> {
@@ -25,14 +42,56 @@ impl Database {
         Ok(listing)
     }
 
-    pub async fn list_active_listings(&self, limit: i64, offset: i64) -> Result<Vec<Listing>> {
-        let listings = sqlx::query_as::<_, Listing>(
-            "SELECT * FROM listings WHERE status = 'active' ORDER BY created_at DESC LIMIT $1 OFFSET $2"
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
+    pub async fn list_active_listings(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &ListingFilter,
+    ) -> Result<Vec<Listing>> {
+        let mut query = QueryBuilder::<Postgres>::new("SELECT l.* FROM listings l");
+
+        if filter.collection_id.is_some() {
+            query.push(" JOIN inscriptions i ON i.inscription_id = l.inscription_id");
+        }
+
+        query.push(" WHERE l.status = ");
+        query.push_bind(ListingStatus::Active);
+
+        if let Some(collection_id) = filter.collection_id {
+            query.push(" AND i.collection_id = ");
+            query.push_bind(collection_id);
+        }
+
+        if let Some(seller_address) = filter.seller_address.as_deref() {
+            query.push(" AND l.seller_address = ");
+            query.push_bind(seller_address);
+        }
+
+        if let Some(min_price_sats) = filter.min_price_sats {
+            query.push(" AND l.price_sats >= ");
+            query.push_bind(min_price_sats);
+        }
+
+        if let Some(max_price_sats) = filter.max_price_sats {
+            query.push(" AND l.price_sats <= ");
+            query.push_bind(max_price_sats);
+        }
+
+        match filter.sort_by.unwrap_or(ListingSort::CreatedAt) {
+            ListingSort::CreatedAt => query.push(" ORDER BY l.created_at DESC"),
+            ListingSort::PriceAsc => query.push(" ORDER BY l.price_sats ASC, l.created_at DESC"),
+            ListingSort::PriceDesc => query.push(" ORDER BY l.price_sats DESC, l.created_at DESC"),
+        };
+
+        query.push(" LIMIT ");
+        query.push_bind(limit);
+        query.push(" OFFSET ");
+        query.push_bind(offset);
+
+        let listings = query
+            .build_query_as::<Listing>()
+            .fetch_all(&self.pool)
+            .await?;
         Ok(listings)
     }
 

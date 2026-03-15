@@ -1,9 +1,12 @@
 use crate::{
+    db::listings::{ListingFilter, ListingSort},
     errors::{AppError, AppResult},
     models::activity::{Activity, ActivityType},
-    models::listing::{CreateListingRequest, Listing, ListingStatus},
+    models::listing::{CreateListingRequest, Listing, ListingStatus, SpendableInputRequest},
     services::magic_eden,
-    services::psbt::{build_locking_psbt, decode_psbt, LockingPsbtRequest},
+    services::psbt::{
+        build_locking_psbt, decode_psbt, LockingPsbtRequest, SpendableInput, WitnessUtxo,
+    },
     ws::WsEvent,
     AppState,
 };
@@ -13,9 +16,25 @@ use axum::{
     Json, Router,
 };
 use bitcoin::secp256k1::PublicKey;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::str::FromStr;
 use uuid::Uuid;
+
+fn map_spendable_input(input: &SpendableInputRequest) -> SpendableInput {
+    SpendableInput {
+        txid: input.txid.clone(),
+        vout: input.vout,
+        value_sats: input.value_sats,
+        witness_utxo: WitnessUtxo {
+            script_pubkey_hex: input.witness_utxo.script_pubkey_hex.clone(),
+            value_sats: input.witness_utxo.value_sats,
+        },
+        non_witness_utxo_hex: input.non_witness_utxo_hex.clone(),
+        redeem_script_hex: input.redeem_script_hex.clone(),
+        witness_script_hex: input.witness_script_hex.clone(),
+        sequence: input.sequence,
+    }
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -26,10 +45,16 @@ pub fn router() -> Router<AppState> {
         .route("/:id/submit-locking", post(submit_locking))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct Pagination {
     limit: Option<i64>,
     offset: Option<i64>,
+    collection_id: Option<Uuid>,
+    seller_address: Option<String>,
+    min_price_sats: Option<i64>,
+    max_price_sats: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_listing_sort")]
+    sort_by: Option<ListingSort>,
 }
 
 async fn list_listings(
@@ -38,12 +63,84 @@ async fn list_listings(
 ) -> AppResult<Json<serde_json::Value>> {
     let limit = pagination.limit.unwrap_or(50);
     let offset = pagination.offset.unwrap_or(0);
+    let filter = ListingFilter {
+        collection_id: pagination.collection_id,
+        seller_address: pagination.seller_address,
+        min_price_sats: pagination.min_price_sats,
+        max_price_sats: pagination.max_price_sats,
+        sort_by: pagination.sort_by,
+    };
     let listings = state
         .db
-        .list_active_listings(limit, offset)
+        .list_active_listings(limit, offset, &filter)
         .await
         .map_err(AppError::Internal)?;
     Ok(Json(serde_json::json!({ "listings": listings })))
+}
+
+fn deserialize_listing_sort<'de, D>(deserializer: D) -> Result<Option<ListingSort>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value.as_deref() {
+        None => Ok(None),
+        Some("created_at") => Ok(Some(ListingSort::CreatedAt)),
+        Some("price_asc") => Ok(Some(ListingSort::PriceAsc)),
+        Some("price_desc") => Ok(Some(ListingSort::PriceDesc)),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "invalid sort_by '{other}', expected one of: created_at, price_asc, price_desc"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Pagination;
+    use crate::db::listings::ListingSort;
+
+    #[test]
+    fn pagination_deserializes_supported_sort_values() {
+        let created_at: Pagination = serde_json::from_value(serde_json::json!({
+            "sort_by": "created_at"
+        }))
+        .expect("created_at should parse");
+        let price_asc: Pagination = serde_json::from_value(serde_json::json!({
+            "sort_by": "price_asc"
+        }))
+        .expect("price_asc should parse");
+        let price_desc: Pagination = serde_json::from_value(serde_json::json!({
+            "sort_by": "price_desc"
+        }))
+        .expect("price_desc should parse");
+
+        assert!(matches!(created_at.sort_by, Some(ListingSort::CreatedAt)));
+        assert!(matches!(price_asc.sort_by, Some(ListingSort::PriceAsc)));
+        assert!(matches!(price_desc.sort_by, Some(ListingSort::PriceDesc)));
+    }
+
+    #[test]
+    fn pagination_rejects_invalid_sort_value() {
+        let err = serde_json::from_value::<Pagination>(serde_json::json!({
+            "sort_by": "rarity"
+        }))
+        .expect_err("invalid sort should fail");
+        assert!(err.to_string().contains("invalid sort_by"));
+    }
+
+    #[test]
+    fn pagination_defaults_filters_to_none() {
+        let pagination: Pagination =
+            serde_json::from_value(serde_json::json!({})).expect("empty query should parse");
+
+        assert!(pagination.collection_id.is_none());
+        assert!(pagination.seller_address.is_none());
+        assert!(pagination.min_price_sats.is_none());
+        assert!(pagination.max_price_sats.is_none());
+        assert!(pagination.sort_by.is_none());
+        assert!(pagination.limit.is_none());
+        assert!(pagination.offset.is_none());
+    }
 }
 
 async fn create_listing(
@@ -60,27 +157,17 @@ async fn create_listing(
                 )
             })?;
 
-            // Resolve inscription UTXO amount — placeholder: real impl would call ord client.
-            // For now, we use a reasonable default; callers should pass inscription_amount_sats.
-            let inscription_amount_sats = req.inscription_amount_sats.unwrap_or(546);
-
-            let network = bitcoin::Network::Bitcoin; // TODO: load from config
+            let inscription_input = req.inscription_input.as_ref().ok_or_else(|| {
+                AppError::BadRequest("inscription_input required for protected listing".to_string())
+            })?;
 
             let locking_req = LockingPsbtRequest {
-                inscription_txid: req.inscription_txid.clone().ok_or_else(|| {
-                    AppError::BadRequest(
-                        "inscription_txid required for protected listing".to_string(),
-                    )
-                })?,
-                inscription_vout: req.inscription_vout.unwrap_or(0),
-                inscription_amount_sats,
+                inscription_input: map_spendable_input(inscription_input),
+                gas_funding_input: req.gas_funding_input.as_ref().map(map_spendable_input),
                 seller_pubkey_hex: seller_pubkey_hex.clone(),
                 marketplace_pubkey_hex: state.marketplace_keypair.pubkey_hex(),
-                network,
-                fee_rate_sat_vb: None, // use floor
-                gas_txid: req.gas_txid.clone(),
-                gas_vout: req.gas_vout,
-                gas_amount_sats: req.gas_amount_sats,
+                network: state.network,
+                min_relay_fee_rate_sat_vb: None,
             };
 
             let locking = build_locking_psbt(&locking_req).map_err(|e| AppError::Internal(e))?;

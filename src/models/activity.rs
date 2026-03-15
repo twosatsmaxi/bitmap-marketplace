@@ -10,6 +10,7 @@ pub enum ActivityType {
     Sale,
     Transfer,
     Mint,
+    Offer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

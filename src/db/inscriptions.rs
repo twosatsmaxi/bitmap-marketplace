@@ -41,6 +41,50 @@ impl Database {
         Ok(inscriptions)
     }
 
+    pub async fn update_inscription_owner(
+        &self,
+        inscription_id: &str,
+        new_owner: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE inscriptions SET owner_address = $1, updated_at = NOW() WHERE inscription_id = $2",
+        )
+        .bind(new_owner)
+        .bind(inscription_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_collection_id_for_inscription(
+        &self,
+        inscription_id: &str,
+    ) -> Result<Option<Uuid>> {
+        let cid = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT collection_id FROM inscriptions WHERE inscription_id = $1",
+        )
+        .bind(inscription_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        Ok(cid)
+    }
+
+    pub async fn assign_inscriptions_to_collection(
+        &self,
+        collection_id: Uuid,
+        inscription_ids: &[String],
+    ) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE inscriptions SET collection_id = $1, updated_at = NOW() WHERE inscription_id = ANY($2)",
+        )
+        .bind(collection_id)
+        .bind(inscription_ids)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn upsert_inscription(&self, inscription: &Inscription) -> Result<Inscription> {
         let result = sqlx::query_as::<_, Inscription>(
             r#"
