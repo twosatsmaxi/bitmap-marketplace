@@ -1,6 +1,8 @@
 use anyhow::Result;
 use axum::Router;
+use bitcoin::Network;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tower::limit::ConcurrencyLimitLayer;
@@ -30,6 +32,7 @@ pub struct AppState {
     pub marketplace_keypair: Arc<MarketplaceKeypair>,
     pub http_client: reqwest::Client,
     pub render_api_base: String,
+    pub network: Network,
 }
 
 #[tokio::main]
@@ -50,7 +53,8 @@ async fn main() -> Result<()> {
         Err(_) => tracing::warn!("DB migrations skipped (connection timed out)"),
     }
 
-    // Spawn background services
+    // Spawn background services (disabled for now)
+    /*
     {
         let db_clone = db.clone();
         tokio::spawn(async move {
@@ -92,14 +96,19 @@ async fn main() -> Result<()> {
             }
         });
     }
+    */
 
     let ws_broadcaster = Arc::new(ws::WsBroadcaster::new());
 
     let marketplace_keypair = MarketplaceKeypair::from_env()
         .expect("MarketplaceKeypair: failed to load from env (check MARKETPLACE_SECRET_KEY)");
+    let network = std::env::var("BITCOIN_NETWORK")
+        .ok()
+        .and_then(|value| Network::from_str(&value).ok())
+        .unwrap_or(Network::Regtest);
 
-    let render_api_base = std::env::var("RENDER_API_BASE")
-        .unwrap_or_else(|_| "http://r2d2.local:3020".to_string());
+    let render_api_base =
+        std::env::var("RENDER_API_BASE").unwrap_or_else(|_| "http://r2d2.local:3020".to_string());
 
     let state = AppState {
         db,
@@ -107,6 +116,7 @@ async fn main() -> Result<()> {
         marketplace_keypair,
         http_client: reqwest::Client::new(),
         render_api_base,
+        network,
     };
 
     // Per-IP rate limiting config.

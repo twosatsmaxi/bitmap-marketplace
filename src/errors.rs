@@ -54,3 +54,39 @@ impl IntoResponse for AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::AppError;
+    use axum::{body::Body, http::StatusCode, response::IntoResponse};
+    use http_body_util::BodyExt;
+
+    async fn body_string(body: Body) -> String {
+        let bytes = body
+            .collect()
+            .await
+            .expect("failed to collect body")
+            .to_bytes();
+        String::from_utf8(bytes.to_vec()).expect("body is not valid utf-8")
+    }
+
+    #[tokio::test]
+    async fn unauthorized_error_returns_401_and_message() {
+        let response = AppError::Unauthorized("invalid API key".to_string()).into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = body_string(response.into_body()).await;
+        assert!(body.contains("invalid API key"));
+        assert!(body.contains("\"error\""));
+    }
+
+    #[tokio::test]
+    async fn internal_error_hides_underlying_message() {
+        let response = AppError::Internal(anyhow::anyhow!("sensitive detail")).into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_string(response.into_body()).await;
+        assert!(body.contains("Internal server error"));
+        assert!(!body.contains("sensitive detail"));
+    }
+}

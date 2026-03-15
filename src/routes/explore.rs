@@ -155,10 +155,15 @@ async fn proxy_block_data(
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     if !upstream.status().is_success() {
-        return Err(StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY));
+        return Err(
+            StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY)
+        );
     }
 
-    let bytes = upstream.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let bytes = upstream
+        .bytes()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/octet-stream".parse().unwrap());
@@ -185,10 +190,15 @@ async fn proxy_block_meta(
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     if !upstream.status().is_success() {
-        return Err(StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY));
+        return Err(
+            StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY)
+        );
     }
 
-    let bytes = upstream.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let bytes = upstream
+        .bytes()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());

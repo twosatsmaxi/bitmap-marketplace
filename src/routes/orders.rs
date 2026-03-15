@@ -1,11 +1,12 @@
 use crate::{
     errors::{AppError, AppResult},
     models::activity::{Activity, ActivityType},
-    models::listing::BuyListingRequest,
+    models::listing::{BuyListingRequest, SpendableInputRequest},
     models::sale::Sale,
     services::psbt::{
         apply_marketplace_signature, build_buy_psbt, build_protected_sale_psbt,
         finalize_and_extract, finalize_multisig_and_extract, BuyRequest, ProtectedSalePsbtRequest,
+        SpendableInput, WitnessUtxo,
     },
     ws::WsEvent,
     AppState,
@@ -17,6 +18,22 @@ use axum::{
 };
 use serde::Deserialize;
 use uuid::Uuid;
+
+fn map_spendable_input(input: &SpendableInputRequest) -> SpendableInput {
+    SpendableInput {
+        txid: input.txid.clone(),
+        vout: input.vout,
+        value_sats: input.value_sats,
+        witness_utxo: WitnessUtxo {
+            script_pubkey_hex: input.witness_utxo.script_pubkey_hex.clone(),
+            value_sats: input.witness_utxo.value_sats,
+        },
+        non_witness_utxo_hex: input.non_witness_utxo_hex.clone(),
+        redeem_script_hex: input.redeem_script_hex.clone(),
+        witness_script_hex: input.witness_script_hex.clone(),
+        sequence: input.sequence,
+    }
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -60,16 +77,8 @@ async fn buy(
             ))
         })?;
 
-        let buyer_utxo_txid = req.buyer_utxo_txid.ok_or_else(|| {
-            AppError::BadRequest("buyer_utxo_txid required for protected purchase".to_string())
-        })?;
-        let buyer_utxo_vout = req.buyer_utxo_vout.ok_or_else(|| {
-            AppError::BadRequest("buyer_utxo_vout required for protected purchase".to_string())
-        })?;
-        let buyer_utxo_amount_sats = req.buyer_utxo_amount_sats.ok_or_else(|| {
-            AppError::BadRequest(
-                "buyer_utxo_amount_sats required for protected purchase".to_string(),
-            )
+        let buyer_funding_input = req.buyer_funding_input.as_ref().ok_or_else(|| {
+            AppError::BadRequest("buyer_funding_input required for protected purchase".to_string())
         })?;
 
         let psbt_req = ProtectedSalePsbtRequest {
@@ -79,9 +88,7 @@ async fn buy(
             seller_address: listing.seller_address.clone(),
             price_sats: listing.price_sats as u64,
             buyer_address: req.buyer_address.clone(),
-            buyer_utxo_txid,
-            buyer_utxo_vout,
-            buyer_utxo_amount_sats,
+            buyer_funding_input: map_spendable_input(buyer_funding_input),
             fee_rate_sat_vb: req.fee_rate_sat_vb.unwrap_or(5.0),
         };
 
@@ -103,15 +110,11 @@ async fn buy(
     let buy_req = BuyRequest {
         seller_psbt_hex,
         buyer_address: req.buyer_address.clone(),
-        buyer_utxo_txid: req
-            .buyer_utxo_txid
-            .ok_or_else(|| AppError::BadRequest("buyer_utxo_txid required".to_string()))?,
-        buyer_utxo_vout: req
-            .buyer_utxo_vout
-            .ok_or_else(|| AppError::BadRequest("buyer_utxo_vout required".to_string()))?,
-        buyer_utxo_amount_sats: req
-            .buyer_utxo_amount_sats
-            .ok_or_else(|| AppError::BadRequest("buyer_utxo_amount_sats required".to_string()))?,
+        buyer_funding_input: map_spendable_input(
+            req.buyer_funding_input
+                .as_ref()
+                .ok_or_else(|| AppError::BadRequest("buyer_funding_input required".to_string()))?,
+        ),
         fee_rate_sat_vb: req.fee_rate_sat_vb.unwrap_or(5.0),
     };
 

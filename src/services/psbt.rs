@@ -5,9 +5,10 @@
 use anyhow::{anyhow, Result};
 use bitcoin::{
     absolute::LockTime,
+    ecdsa,
     opcodes::all as op,
-    psbt::{Input as PsbtInput, Output as PsbtOutput, Psbt},
-    script::Builder as ScriptBuilder,
+    psbt::{Input as PsbtInput, Output as PsbtOutput, Psbt, PsbtSighashType},
+    script::{Builder as ScriptBuilder, PushBytesBuf},
     secp256k1::PublicKey,
     Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
     Witness,
@@ -16,54 +17,61 @@ use std::str::FromStr;
 
 use crate::services::marketplace_keypair::MarketplaceKeypair;
 
-// ---------------------------------------------------------------------------
-// Structs
-// ---------------------------------------------------------------------------
+#[derive(Clone, Debug)]
+pub struct WitnessUtxo {
+    pub script_pubkey_hex: String,
+    pub value_sats: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SpendableInput {
+    pub txid: String,
+    pub vout: u32,
+    pub value_sats: u64,
+    pub witness_utxo: WitnessUtxo,
+    pub non_witness_utxo_hex: Option<String>,
+    pub redeem_script_hex: Option<String>,
+    pub witness_script_hex: Option<String>,
+    pub sequence: Option<u32>,
+}
 
 pub struct ListingRequest {
     pub inscription_txid: String,
     pub inscription_vout: u32,
-    pub seller_address: String, // base58/bech32 Bitcoin address
+    pub seller_address: String,
     pub price_sats: u64,
 }
 
+#[derive(Debug)]
 pub struct ListingPsbt {
-    pub psbt_hex: String, // unsigned PSBT for seller to sign
+    pub psbt_hex: String,
     pub inscription_txid: String,
     pub inscription_vout: u32,
 }
 
 pub struct BuyRequest {
-    pub seller_psbt_hex: String, // seller's signed PSBT from DB
+    pub seller_psbt_hex: String,
     pub buyer_address: String,
-    pub buyer_utxo_txid: String,
-    pub buyer_utxo_vout: u32,
-    pub buyer_utxo_amount_sats: u64,
+    pub buyer_funding_input: SpendableInput,
     pub fee_rate_sat_vb: f64,
 }
 
+#[derive(Debug)]
 pub struct BuyPsbt {
-    pub psbt_hex: String, // combined PSBT for buyer to sign
+    pub psbt_hex: String,
     pub estimated_fee_sats: u64,
 }
 
-// Mempool protection structs
-
 pub struct LockingPsbtRequest {
-    pub inscription_txid: String,
-    pub inscription_vout: u32,
-    pub inscription_amount_sats: u64,
+    pub inscription_input: SpendableInput,
+    pub gas_funding_input: Option<SpendableInput>,
     pub seller_pubkey_hex: String,
     pub marketplace_pubkey_hex: String,
     pub network: Network,
-    /// Fee rate in sat/vB; if None, uses DEFAULT_LOCKING_TX_FEE_SATS floor.
-    pub fee_rate_sat_vb: Option<f64>,
-    /// Optional gas funding UTXO (required when inscription_amount_sats < MIN_SELF_FUNDED).
-    pub gas_txid: Option<String>,
-    pub gas_vout: Option<u32>,
-    pub gas_amount_sats: Option<u64>,
+    pub min_relay_fee_rate_sat_vb: Option<f64>,
 }
 
+#[derive(Debug)]
 pub struct LockingPsbt {
     pub psbt_hex: String,
     pub multisig_address: String,
@@ -71,57 +79,54 @@ pub struct LockingPsbt {
 }
 
 pub struct ProtectedSalePsbtRequest {
-    /// Raw hex of the (not-yet-broadcast) locking transaction.
     pub locking_raw_tx_hex: String,
-    /// Vout index of the multisig output in the locking tx (typically 0).
     pub multisig_vout: u32,
     pub multisig_script_hex: String,
     pub seller_address: String,
     pub price_sats: u64,
     pub buyer_address: String,
-    pub buyer_utxo_txid: String,
-    pub buyer_utxo_vout: u32,
-    pub buyer_utxo_amount_sats: u64,
+    pub buyer_funding_input: SpendableInput,
     pub fee_rate_sat_vb: f64,
 }
 
+#[derive(Debug)]
 pub struct ProtectedSalePsbt {
     pub psbt_hex: String,
     pub estimated_fee_sats: u64,
-    /// Txid of the locking tx (derived from locking_raw_tx_hex).
     pub locking_txid: String,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SupportedInputType {
+    P2shP2wpkh,
+    P2wpkh,
+    P2tr,
+}
+
+const DEFAULT_MIN_RELAY_FEE_RATE_SAT_VB: f64 = 0.1;
+const LOCKING_TX_OUTPUT_VBYTES: f64 = 43.0;
+const LOCKING_TX_OVERHEAD_VBYTES: f64 = 10.5;
+const SALE_TX_OUTPUT_VBYTES: f64 = 31.0;
+const SALE_TX_OVERHEAD_VBYTES: f64 = 10.5;
+const MULTISIG_INPUT_VBYTES: f64 = 140.0;
+const INSCRIPTION_DUST_SATS: u64 = 546;
+const LOCKING_OUTPUT_DUST_SATS: u64 = 330;
+
 /// Minimum inscription value (sats) that is self-funding for locking tx.
-/// Below this, a gas funding UTXO must be provided.
 pub const MIN_SELF_FUNDED: u64 = 343;
-/// Fallback flat fee floor for locking tx if no dynamic estimate is available.
+/// Flat locking fee kept compatible with the existing marketplace workflow.
 pub const DEFAULT_LOCKING_TX_FEE_SATS: u64 = 13;
 
-// ---------------------------------------------------------------------------
-// Listing construction (bitmap-marketplace-ssd)
-// ---------------------------------------------------------------------------
-
-/// Build an unsigned PSBT that the seller signs with SIGHASH_SINGLE | ANYONECANPAY.
-///
-/// The resulting PSBT has:
-///   - Input  0: inscription UTXO (seller provides, signed with SINGLE|ACP)
-///   - Output 0: payment to seller for `price_sats`
-///
-/// The buyer will later add their own inputs/outputs before broadcasting.
 pub fn build_listing_psbt(req: &ListingRequest) -> Result<ListingPsbt> {
-    // Parse the inscription outpoint.
     let txid = Txid::from_str(&req.inscription_txid)
         .map_err(|e| anyhow!("invalid inscription txid: {}", e))?;
     let outpoint = OutPoint::new(txid, req.inscription_vout);
 
-    // Parse seller address → script_pubkey.
     let seller_addr = Address::from_str(&req.seller_address)
         .map_err(|e| anyhow!("invalid seller address: {}", e))?
         .assume_checked();
     let seller_script = seller_addr.script_pubkey();
 
-    // Build the unsigned transaction skeleton.
     let tx_in = TxIn {
         previous_output: outpoint,
         script_sig: ScriptBuf::new(),
@@ -141,13 +146,10 @@ pub fn build_listing_psbt(req: &ListingRequest) -> Result<ListingPsbt> {
         output: vec![tx_out],
     };
 
-    // Wrap in a PSBT.
     let mut psbt =
         Psbt::from_unsigned_tx(unsigned_tx).map_err(|e| anyhow!("PSBT creation failed: {}", e))?;
 
-    // Annotate input 0 with SIGHASH_SINGLE | ANYONECANPAY so the seller's wallet
-    // knows which sighash type to use when signing.
-    psbt.inputs[0].sighash_type = Some(bitcoin::psbt::PsbtSighashType::from(
+    psbt.inputs[0].sighash_type = Some(PsbtSighashType::from(
         bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
     ));
 
@@ -158,60 +160,223 @@ pub fn build_listing_psbt(req: &ListingRequest) -> Result<ListingPsbt> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Buy flow completion (bitmap-marketplace-jaa)
-// ---------------------------------------------------------------------------
-
-/// Estimate transaction size in vbytes using the formula:
-///   10 + 41 * n_inputs + 31 * n_outputs
-fn estimate_tx_vbytes(n_inputs: usize, n_outputs: usize) -> u64 {
-    (10 + 41 * n_inputs + 31 * n_outputs) as u64
+fn is_p2wpkh_script(script: &ScriptBuf) -> bool {
+    let bytes = script.as_bytes();
+    bytes.len() == 22 && bytes[0] == 0x00 && bytes[1] == 0x14
 }
 
-/// Add the buyer's inputs/outputs to the seller's signed PSBT and return the
-/// combined PSBT hex for the buyer to sign their own input.
-///
-/// The final transaction will have:
-///   - Input  0: inscription UTXO (seller, already signed with SINGLE|ACP)
-///   - Input  1: buyer's payment UTXO
-///   - Output 0: payment to seller (carried from seller PSBT)
-///   - Output 1: inscription dust to buyer (546 sats)
-///   - Output 2: change back to buyer
+fn is_p2tr_script(script: &ScriptBuf) -> bool {
+    let bytes = script.as_bytes();
+    bytes.len() == 34 && bytes[0] == 0x51 && bytes[1] == 0x20
+}
+
+fn is_p2sh_script(script: &ScriptBuf) -> bool {
+    let bytes = script.as_bytes();
+    bytes.len() == 23 && bytes[0] == 0xa9 && bytes[1] == 0x14 && bytes[22] == 0x87
+}
+
+fn locking_input_vbytes(input_type: SupportedInputType) -> f64 {
+    match input_type {
+        SupportedInputType::P2shP2wpkh => 91.0,
+        SupportedInputType::P2wpkh => 67.75,
+        SupportedInputType::P2tr => 57.5,
+    }
+}
+
+fn sale_tx_vbytes(buyer_input_type: SupportedInputType) -> u64 {
+    (SALE_TX_OVERHEAD_VBYTES
+        + MULTISIG_INPUT_VBYTES
+        + locking_input_vbytes(buyer_input_type)
+        + (SALE_TX_OUTPUT_VBYTES * 3.0))
+        .ceil() as u64
+}
+
+fn estimate_locking_tx_vbytes(input_types: &[SupportedInputType]) -> u64 {
+    (LOCKING_TX_OVERHEAD_VBYTES
+        + LOCKING_TX_OUTPUT_VBYTES
+        + input_types
+            .iter()
+            .copied()
+            .map(locking_input_vbytes)
+            .sum::<f64>())
+    .ceil() as u64
+}
+
+fn parse_script_hex(label: &str, value: &str) -> Result<ScriptBuf> {
+    let bytes = hex::decode(value).map_err(|e| anyhow!("invalid {label}: {}", e))?;
+    Ok(ScriptBuf::from_bytes(bytes))
+}
+
+fn parse_tx_hex(label: &str, value: &str) -> Result<Transaction> {
+    let bytes = hex::decode(value).map_err(|e| anyhow!("invalid {label}: {}", e))?;
+    bitcoin::consensus::deserialize(&bytes).map_err(|e| anyhow!("invalid {label}: {}", e))
+}
+
+fn parse_witness_utxo(input: &SpendableInput) -> Result<TxOut> {
+    if input.value_sats != input.witness_utxo.value_sats {
+        return Err(anyhow!(
+            "input value mismatch: value_sats {} != witness_utxo.value_sats {}",
+            input.value_sats,
+            input.witness_utxo.value_sats
+        ));
+    }
+
+    Ok(TxOut {
+        value: Amount::from_sat(input.witness_utxo.value_sats),
+        script_pubkey: parse_script_hex(
+            "witness_utxo.script_pubkey_hex",
+            &input.witness_utxo.script_pubkey_hex,
+        )?,
+    })
+}
+
+fn parse_sequence(sequence: Option<u32>) -> Sequence {
+    sequence
+        .map(Sequence)
+        .unwrap_or(Sequence::ENABLE_RBF_NO_LOCKTIME)
+}
+
+fn detect_supported_input_type(input: &SpendableInput, label: &str) -> Result<SupportedInputType> {
+    let witness_utxo = parse_witness_utxo(input)?;
+    if is_p2wpkh_script(&witness_utxo.script_pubkey) {
+        return Ok(SupportedInputType::P2wpkh);
+    }
+    if is_p2tr_script(&witness_utxo.script_pubkey) {
+        return Ok(SupportedInputType::P2tr);
+    }
+    if is_p2sh_script(&witness_utxo.script_pubkey) {
+        let redeem_script_hex = input.redeem_script_hex.as_deref().ok_or_else(|| {
+            anyhow!("{label} wrapped segwit input must provide redeem_script_hex")
+        })?;
+        let redeem_script = parse_script_hex("redeem_script_hex", redeem_script_hex)?;
+        if !is_p2wpkh_script(&redeem_script) {
+            return Err(anyhow!(
+                "{label} redeem_script_hex must be a native p2wpkh script for wrapped segwit inputs"
+            ));
+        }
+        return Ok(SupportedInputType::P2shP2wpkh);
+    }
+
+    Err(anyhow!(
+        "{label} must be wrapped segwit (p2sh-p2wpkh), native segwit (p2wpkh), or taproot (p2tr)"
+    ))
+}
+
+fn add_spendable_input(psbt: &mut Psbt, input_index: usize, input: &SpendableInput) -> Result<()> {
+    let witness_utxo = parse_witness_utxo(input)?;
+    let mut psbt_input = PsbtInput {
+        witness_utxo: Some(witness_utxo),
+        ..Default::default()
+    };
+
+    if let Some(non_witness_utxo_hex) = input.non_witness_utxo_hex.as_deref() {
+        psbt_input.non_witness_utxo =
+            Some(parse_tx_hex("non_witness_utxo_hex", non_witness_utxo_hex)?);
+    }
+    if let Some(redeem_script_hex) = input.redeem_script_hex.as_deref() {
+        psbt_input.redeem_script = Some(parse_script_hex("redeem_script_hex", redeem_script_hex)?);
+    }
+    if let Some(witness_script_hex) = input.witness_script_hex.as_deref() {
+        psbt_input.witness_script =
+            Some(parse_script_hex("witness_script_hex", witness_script_hex)?);
+    }
+
+    psbt.inputs[input_index] = psbt_input;
+    Ok(())
+}
+
+fn finalize_input(input: &mut PsbtInput) -> Result<()> {
+    if input.final_script_sig.is_some() || input.final_script_witness.is_some() {
+        return Ok(());
+    }
+
+    if let Some(tap_key_sig) = input.tap_key_sig.take() {
+        let mut witness = Witness::new();
+        witness.push(tap_key_sig.to_vec());
+        input.final_script_witness = Some(witness);
+        input.sighash_type = None;
+        input.redeem_script = None;
+        input.witness_script = None;
+        input.partial_sigs.clear();
+        return Ok(());
+    }
+
+    if input.partial_sigs.is_empty() {
+        return Err(anyhow!("input missing signatures"));
+    }
+
+    let witness_utxo = input
+        .witness_utxo
+        .clone()
+        .ok_or_else(|| anyhow!("input missing witness_utxo"))?;
+
+    if is_p2wpkh_script(&witness_utxo.script_pubkey) {
+        let (pubkey, sig) = input
+            .partial_sigs
+            .iter()
+            .next()
+            .ok_or_else(|| anyhow!("p2wpkh input missing partial signature"))?;
+        input.final_script_witness = Some(Witness::from_slice(&[sig.to_vec(), pubkey.to_bytes()]));
+        input.partial_sigs.clear();
+        input.sighash_type = None;
+        return Ok(());
+    }
+
+    if is_p2sh_script(&witness_utxo.script_pubkey) {
+        let redeem_script = input
+            .redeem_script
+            .clone()
+            .ok_or_else(|| anyhow!("p2sh-p2wpkh input missing redeem_script"))?;
+        if !is_p2wpkh_script(&redeem_script) {
+            return Err(anyhow!("unsupported p2sh redeem script"));
+        }
+        let (pubkey, sig) = input
+            .partial_sigs
+            .iter()
+            .next()
+            .ok_or_else(|| anyhow!("p2sh-p2wpkh input missing partial signature"))?;
+        input.final_script_sig = Some(push_script_bytes(redeem_script.as_bytes())?);
+        input.final_script_witness = Some(Witness::from_slice(&[sig.to_vec(), pubkey.to_bytes()]));
+        input.partial_sigs.clear();
+        input.sighash_type = None;
+        input.redeem_script = None;
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "unsupported finalized input type; only p2wpkh, p2sh-p2wpkh, and p2tr are supported"
+    ))
+}
+
+fn push_script_bytes(bytes: &[u8]) -> Result<ScriptBuf> {
+    let push_bytes = PushBytesBuf::try_from(bytes.to_vec())
+        .map_err(|_| anyhow!("script bytes exceed push size limit"))?;
+    Ok(ScriptBuilder::new().push_slice(push_bytes).into_script())
+}
+
 pub fn build_buy_psbt(req: &BuyRequest) -> Result<BuyPsbt> {
-    // Deserialise the seller's PSBT.
     let psbt = decode_psbt(&req.seller_psbt_hex)?;
 
-    // Validate basic structure: must have exactly 1 input and 1 output (the seller's).
     if psbt.unsigned_tx.input.len() != 1 || psbt.unsigned_tx.output.len() != 1 {
         return Err(anyhow!(
             "seller PSBT has unexpected structure: expected 1 input and 1 output"
         ));
     }
 
-    // Price is what the seller expects (output 0 value).
     let price_sats = psbt.unsigned_tx.output[0].value.to_sat();
-
-    // Dust limit for the inscription output delivered to buyer (P2WPKH minimum).
-    const INSCRIPTION_DUST_SATS: u64 = 546;
-
-    // Parse the buyer's address.
     let buyer_addr = Address::from_str(&req.buyer_address)
         .map_err(|e| anyhow!("invalid buyer address: {}", e))?
         .assume_checked();
     let buyer_script = buyer_addr.script_pubkey();
+    let buyer_input_type =
+        detect_supported_input_type(&req.buyer_funding_input, "buyer_funding_input")?;
 
-    // Estimate fee (3 inputs would be worst case; we have 2 inputs, 3 outputs).
-    let n_inputs = 2usize;
-    let n_outputs = 3usize;
-    let estimated_fee_sats =
-        (estimate_tx_vbytes(n_inputs, n_outputs) as f64 * req.fee_rate_sat_vb) as u64;
-
-    // Verify the buyer's UTXO covers price + dust + fee.
+    let estimated_fee_sats = (sale_tx_vbytes(buyer_input_type) as f64 * req.fee_rate_sat_vb) as u64;
     let total_required = price_sats + INSCRIPTION_DUST_SATS + estimated_fee_sats;
-    if req.buyer_utxo_amount_sats < total_required {
+    if req.buyer_funding_input.value_sats < total_required {
         return Err(anyhow!(
-            "buyer UTXO amount ({} sats) is insufficient; need at least {} sats (price {} + dust {} + fee {})",
-            req.buyer_utxo_amount_sats,
+            "buyer input amount ({} sats) is insufficient; need at least {} sats (price {} + dust {} + fee {})",
+            req.buyer_funding_input.value_sats,
             total_required,
             price_sats,
             INSCRIPTION_DUST_SATS,
@@ -219,69 +384,39 @@ pub fn build_buy_psbt(req: &BuyRequest) -> Result<BuyPsbt> {
         ));
     }
 
-    let change_sats =
-        req.buyer_utxo_amount_sats - price_sats - INSCRIPTION_DUST_SATS - estimated_fee_sats;
-
-    // Build the additional input (buyer's UTXO).
-    let buyer_txid = Txid::from_str(&req.buyer_utxo_txid)
-        .map_err(|e| anyhow!("invalid buyer UTXO txid: {}", e))?;
-    let buyer_outpoint = OutPoint::new(buyer_txid, req.buyer_utxo_vout);
+    let change_sats = req.buyer_funding_input.value_sats
+        - price_sats
+        - INSCRIPTION_DUST_SATS
+        - estimated_fee_sats;
+    let buyer_txid = Txid::from_str(&req.buyer_funding_input.txid)
+        .map_err(|e| anyhow!("invalid buyer input txid: {}", e))?;
     let buyer_tx_in = TxIn {
-        previous_output: buyer_outpoint,
+        previous_output: OutPoint::new(buyer_txid, req.buyer_funding_input.vout),
         script_sig: ScriptBuf::new(),
-        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+        sequence: parse_sequence(req.buyer_funding_input.sequence),
         witness: Witness::default(),
     };
 
-    // Output 1: inscription dust to buyer.
-    let inscription_out = TxOut {
-        value: Amount::from_sat(INSCRIPTION_DUST_SATS),
-        script_pubkey: buyer_script.clone(),
-    };
-
-    // Output 2: change back to buyer.
-    let change_out = TxOut {
-        value: Amount::from_sat(change_sats),
-        script_pubkey: buyer_script,
-    };
-
-    // Reconstruct the full unsigned transaction by cloning the seller's skeleton
-    // and appending the buyer's input and outputs.
     let mut tx = psbt.unsigned_tx.clone();
     tx.input.push(buyer_tx_in);
-    tx.output.push(inscription_out);
-    tx.output.push(change_out);
+    tx.output.push(TxOut {
+        value: Amount::from_sat(INSCRIPTION_DUST_SATS),
+        script_pubkey: buyer_script.clone(),
+    });
+    tx.output.push(TxOut {
+        value: Amount::from_sat(change_sats),
+        script_pubkey: buyer_script,
+    });
 
-    // Rebuild the PSBT from the extended transaction.
-    // We need to carry over the seller's input metadata (sighash type, witness UTXO, partial sigs).
     let seller_input_meta = psbt.inputs[0].clone();
     let seller_output_meta = psbt.outputs[0].clone();
 
     let mut new_psbt = Psbt::from_unsigned_tx(tx)
         .map_err(|e| anyhow!("PSBT creation from extended tx failed: {}", e))?;
-
-    // Restore seller's input metadata (including partial_sigs already present).
     new_psbt.inputs[0] = seller_input_meta;
-
-    // Restore seller's output metadata.
     new_psbt.outputs[0] = seller_output_meta;
-
-    // Annotate buyer's input (index 1) with the buyer's UTXO info.
-    // We set witness_utxo so signing libraries can compute the sighash.
-    new_psbt.inputs[1] = PsbtInput {
-        witness_utxo: Some(TxOut {
-            value: Amount::from_sat(req.buyer_utxo_amount_sats),
-            // We don't know the exact script_pubkey without a lookup, so leave it
-            // empty here; the buyer's wallet will fill it in when signing.
-            script_pubkey: ScriptBuf::new(),
-        }),
-        ..Default::default()
-    };
-
-    // Ensure we have output metadata slots for the new outputs.
-    // new_psbt already has 3 output slots (from from_unsigned_tx), but they are default.
-    // Output 0 was already restored above; outputs 1 and 2 remain default — that's fine.
-    let _ = PsbtOutput::default(); // just to show the type is available
+    add_spendable_input(&mut new_psbt, 1, &req.buyer_funding_input)?;
+    let _ = PsbtOutput::default();
 
     Ok(BuyPsbt {
         psbt_hex: encode_psbt(&new_psbt),
@@ -289,55 +424,19 @@ pub fn build_buy_psbt(req: &BuyRequest) -> Result<BuyPsbt> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Finalize and extract (bitmap-marketplace-jaa)
-// ---------------------------------------------------------------------------
-
-/// Take a fully-signed PSBT (buyer has added their signature), finalize it,
-/// and return the raw transaction hex ready for broadcast.
-///
-/// Finalization moves `partial_sigs` into `final_script_sig` / `final_script_witness`
-/// for each input, then extracts the network transaction.
 pub fn finalize_and_extract(signed_psbt_hex: &str) -> Result<String> {
     let mut psbt = decode_psbt(signed_psbt_hex)?;
-
-    // Manually finalize each input by promoting partial_sigs.
     for input in psbt.inputs.iter_mut() {
-        // If already finalized, leave it alone.
-        if input.final_script_sig.is_some() || input.final_script_witness.is_some() {
-            continue;
-        }
-
-        // For segwit inputs: move partial signatures into final_script_witness.
-        if !input.partial_sigs.is_empty() {
-            let mut witness_items: Vec<Vec<u8>> = Vec::new();
-
-            // BIP-174 / BIP-141: for P2WPKH the witness is [sig, pubkey].
-            for (pubkey, sig) in &input.partial_sigs {
-                witness_items.push(sig.to_vec());
-                witness_items.push(pubkey.to_bytes());
-            }
-
-            input.final_script_witness = Some(Witness::from_slice(&witness_items));
-            input.partial_sigs.clear();
-        }
+        finalize_input(input)?;
     }
 
-    // Extract the finalized transaction.
     let final_tx = psbt
         .extract_tx()
         .map_err(|e| anyhow!("failed to extract transaction from PSBT: {}", e))?;
-
-    // Serialize to raw transaction hex.
     let raw_bytes = bitcoin::consensus::encode::serialize(&final_tx);
     Ok(hex::encode(raw_bytes))
 }
 
-// ---------------------------------------------------------------------------
-// Mempool protection: locking tx PSBT
-// ---------------------------------------------------------------------------
-
-/// Sort two compressed pubkeys lexicographically (BIP-67) for deterministic multisig.
 fn bip67_sort(a: &[u8; 33], b: &[u8; 33]) -> ([u8; 33], [u8; 33]) {
     if a <= b {
         (*a, *b)
@@ -346,8 +445,6 @@ fn bip67_sort(a: &[u8; 33], b: &[u8; 33]) -> ([u8; 33], [u8; 33]) {
     }
 }
 
-/// Build the P2WSH 2-of-2 multisig redeem script (witness script).
-/// Keys are BIP-67 sorted for deterministic address derivation.
 pub fn build_multisig_redeem_script(
     seller_pk: &PublicKey,
     marketplace_pk: &PublicKey,
@@ -355,21 +452,17 @@ pub fn build_multisig_redeem_script(
     let (pk1, pk2) = bip67_sort(&seller_pk.serialize(), &marketplace_pk.serialize());
     ScriptBuilder::new()
         .push_opcode(op::OP_PUSHNUM_2)
-        .push_slice(&pk1)
-        .push_slice(&pk2)
+        .push_slice(pk1)
+        .push_slice(pk2)
         .push_opcode(op::OP_PUSHNUM_2)
         .push_opcode(op::OP_CHECKMULTISIG)
         .into_script()
 }
 
-/// Derive the P2WSH address from a redeem (witness) script.
 pub fn p2wsh_address(witness_script: &ScriptBuf, network: Network) -> Address {
     Address::p2wsh(witness_script, network)
 }
 
-/// Build an unsigned locking PSBT: inscription UTXO → P2WSH 2-of-2 multisig.
-/// The seller signs this with their normal sighash (SIGHASH_ALL).
-/// The signed raw tx is stored in the DB; it is NOT broadcast until purchase time.
 pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
     let seller_pk = PublicKey::from_str(&req.seller_pubkey_hex)
         .map_err(|e| anyhow!("invalid seller_pubkey_hex: {}", e))?;
@@ -378,79 +471,93 @@ pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
 
     let witness_script = build_multisig_redeem_script(&seller_pk, &marketplace_pk);
     let multisig_address = p2wsh_address(&witness_script, req.network);
+    let inscription_input_type =
+        detect_supported_input_type(&req.inscription_input, "inscription_input")?;
+    let min_relay_fee_rate = req
+        .min_relay_fee_rate_sat_vb
+        .unwrap_or(DEFAULT_MIN_RELAY_FEE_RATE_SAT_VB);
 
-    // Calculate locking tx fee.
-    // Locking tx: 1 or 2 inputs, 1 output → estimate ~110–155 vbytes.
-    let has_gas = req.gas_txid.is_some();
-    let n_inputs = if has_gas { 2 } else { 1 };
-    let fee_sats = if let Some(rate) = req.fee_rate_sat_vb {
-        let vbytes = estimate_tx_vbytes(n_inputs, 1);
-        std::cmp::max((vbytes as f64 * rate) as u64, DEFAULT_LOCKING_TX_FEE_SATS)
-    } else {
-        DEFAULT_LOCKING_TX_FEE_SATS
-    };
+    if !min_relay_fee_rate.is_finite() || min_relay_fee_rate < 0.0 {
+        return Err(anyhow!(
+            "min_relay_fee_rate_sat_vb must be a finite non-negative number"
+        ));
+    }
 
-    // The multisig output value equals inscription amount (self-funded) or gas amount minus fee.
-    let inscription_txid = Txid::from_str(&req.inscription_txid)
-        .map_err(|e| anyhow!("invalid inscription_txid: {}", e))?;
-    let inscription_outpoint = OutPoint::new(inscription_txid, req.inscription_vout);
+    let mut input_types = vec![inscription_input_type];
+    if req.inscription_input.value_sats < MIN_SELF_FUNDED && req.gas_funding_input.is_none() {
+        return Err(anyhow!(
+            "inscription input {} sats is below MIN_SELF_FUNDED ({} sats); provide gas_funding_input",
+            req.inscription_input.value_sats,
+            MIN_SELF_FUNDED
+        ));
+    }
 
-    let inscription_input = TxIn {
-        previous_output: inscription_outpoint,
-        script_sig: ScriptBuf::new(),
-        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-        witness: Witness::default(),
-    };
-
-    let multisig_value_sats = if has_gas {
-        let gas_amt = req.gas_amount_sats.unwrap_or(0);
-        req.inscription_amount_sats + gas_amt - fee_sats
-    } else {
-        if req.inscription_amount_sats < MIN_SELF_FUNDED {
+    if let Some(gas_input) = req.gas_funding_input.as_ref() {
+        let gas_type = detect_supported_input_type(gas_input, "gas_funding_input")?;
+        input_types.push(gas_type);
+        let minimum_gas_funding_sats =
+            (estimate_locking_tx_vbytes(&input_types) as f64 * min_relay_fee_rate).ceil() as u64;
+        if gas_input.value_sats < minimum_gas_funding_sats {
             return Err(anyhow!(
-                "inscription value ({} sats) is below MIN_SELF_FUNDED ({} sats); provide a gas UTXO",
-                req.inscription_amount_sats,
-                MIN_SELF_FUNDED
+                "gas_funding_input requires at least {} sats (locking tx {} vbytes at {} sat/vB)",
+                minimum_gas_funding_sats,
+                estimate_locking_tx_vbytes(&input_types),
+                min_relay_fee_rate
             ));
         }
-        req.inscription_amount_sats - fee_sats
-    };
+    }
 
-    let multisig_output = TxOut {
-        value: Amount::from_sat(multisig_value_sats),
-        script_pubkey: multisig_address.script_pubkey(),
-    };
+    let locked_value_sats = req.inscription_input.value_sats
+        + req
+            .gas_funding_input
+            .as_ref()
+            .map(|input| input.value_sats)
+            .unwrap_or(0)
+        - DEFAULT_LOCKING_TX_FEE_SATS;
 
-    let mut inputs = vec![inscription_input];
+    if locked_value_sats < LOCKING_OUTPUT_DUST_SATS {
+        return Err(anyhow!(
+            "locking output would be {} sats, below dust limit {} sats",
+            locked_value_sats,
+            LOCKING_OUTPUT_DUST_SATS
+        ));
+    }
 
-    if has_gas {
-        let gas_txid = Txid::from_str(req.gas_txid.as_deref().unwrap())
-            .map_err(|e| anyhow!("invalid gas_txid: {}", e))?;
-        let gas_input = TxIn {
-            previous_output: OutPoint::new(gas_txid, req.gas_vout.unwrap_or(0)),
+    let inscription_txid = Txid::from_str(&req.inscription_input.txid)
+        .map_err(|e| anyhow!("invalid inscription_input.txid: {}", e))?;
+    let mut inputs = vec![TxIn {
+        previous_output: OutPoint::new(inscription_txid, req.inscription_input.vout),
+        script_sig: ScriptBuf::new(),
+        sequence: parse_sequence(req.inscription_input.sequence),
+        witness: Witness::default(),
+    }];
+
+    if let Some(gas_input) = req.gas_funding_input.as_ref() {
+        let gas_txid = Txid::from_str(&gas_input.txid)
+            .map_err(|e| anyhow!("invalid gas_funding_input.txid: {}", e))?;
+        inputs.push(TxIn {
+            previous_output: OutPoint::new(gas_txid, gas_input.vout),
             script_sig: ScriptBuf::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            sequence: parse_sequence(gas_input.sequence),
             witness: Witness::default(),
-        };
-        inputs.push(gas_input);
+        });
     }
 
     let unsigned_tx = Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: LockTime::ZERO,
         input: inputs,
-        output: vec![multisig_output],
+        output: vec![TxOut {
+            value: Amount::from_sat(locked_value_sats),
+            script_pubkey: multisig_address.script_pubkey(),
+        }],
     };
 
     let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)
         .map_err(|e| anyhow!("locking PSBT creation failed: {}", e))?;
-
-    // Annotate input 0 with witness_utxo so seller's wallet can compute sighash.
-    // We set the script_pubkey to the multisig script so it knows it's a P2WSH spend.
-    // (The buyer-facing wallets will fill in UTXOs; this is just the template.)
-    // Also set witness_script on all inputs so PSBT-aware wallets know what to sign.
-    for input in psbt.inputs.iter_mut() {
-        input.witness_script = Some(witness_script.clone());
+    add_spendable_input(&mut psbt, 0, &req.inscription_input)?;
+    if let Some(gas_input) = req.gas_funding_input.as_ref() {
+        add_spendable_input(&mut psbt, 1, gas_input)?;
     }
 
     Ok(LockingPsbt {
@@ -460,50 +567,31 @@ pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Mempool protection: protected sale PSBT
-// ---------------------------------------------------------------------------
-
-/// Build the protected sale PSBT that spends from the (not-yet-broadcast) locking tx.
-/// - Input 0: multisig output of locking tx (seller signs with SIGHASH_SINGLE | ANYONECANPAY)
-/// - Input 1: buyer's payment UTXO (buyer signs normally)
-/// - Output 0: payment to seller
-/// - Output 1: inscription dust to buyer (546 sats)
-/// - Output 2: change to buyer
 pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<ProtectedSalePsbt> {
-    // Decode the locking raw tx to get its txid and output value.
-    let locking_tx_bytes = hex::decode(&req.locking_raw_tx_hex)
-        .map_err(|e| anyhow!("invalid locking_raw_tx_hex: {}", e))?;
-    let locking_tx: Transaction = bitcoin::consensus::deserialize(&locking_tx_bytes)
-        .map_err(|e| anyhow!("cannot deserialize locking tx: {}", e))?;
+    let locking_tx = parse_tx_hex("locking_raw_tx_hex", &req.locking_raw_tx_hex)?;
     let locking_txid = locking_tx.txid();
-
     let multisig_txout = locking_tx
         .output
         .get(req.multisig_vout as usize)
-        .ok_or_else(|| anyhow!("locking tx has no output at vout {}", req.multisig_vout))?;
+        .ok_or_else(|| anyhow!("locking tx has no output at vout {}", req.multisig_vout))?
+        .clone();
 
-    // Parse addresses.
     let seller_addr = Address::from_str(&req.seller_address)
         .map_err(|e| anyhow!("invalid seller_address: {}", e))?
         .assume_checked();
     let buyer_addr = Address::from_str(&req.buyer_address)
         .map_err(|e| anyhow!("invalid buyer_address: {}", e))?
         .assume_checked();
+    let witness_script = parse_script_hex("multisig_script_hex", &req.multisig_script_hex)?;
+    let buyer_input_type =
+        detect_supported_input_type(&req.buyer_funding_input, "buyer_funding_input")?;
 
-    // Parse witness script.
-    let multisig_script_bytes = hex::decode(&req.multisig_script_hex)
-        .map_err(|e| anyhow!("invalid multisig_script_hex: {}", e))?;
-    let witness_script = ScriptBuf::from_bytes(multisig_script_bytes);
-
-    const INSCRIPTION_DUST_SATS: u64 = 546;
-    let estimated_fee_sats = (estimate_tx_vbytes(2, 3) as f64 * req.fee_rate_sat_vb) as u64;
+    let estimated_fee_sats = (sale_tx_vbytes(buyer_input_type) as f64 * req.fee_rate_sat_vb) as u64;
     let total_required = req.price_sats + INSCRIPTION_DUST_SATS + estimated_fee_sats;
-
-    if req.buyer_utxo_amount_sats < total_required {
+    if req.buyer_funding_input.value_sats < total_required {
         return Err(anyhow!(
-            "buyer UTXO ({} sats) insufficient; need {} sats (price {} + dust {} + fee {})",
-            req.buyer_utxo_amount_sats,
+            "buyer input ({} sats) insufficient; need {} sats (price {} + dust {} + fee {})",
+            req.buyer_funding_input.value_sats,
             total_required,
             req.price_sats,
             INSCRIPTION_DUST_SATS,
@@ -511,65 +599,55 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
         ));
     }
 
-    let change_sats =
-        req.buyer_utxo_amount_sats - req.price_sats - INSCRIPTION_DUST_SATS - estimated_fee_sats;
+    let change_sats = req.buyer_funding_input.value_sats
+        - req.price_sats
+        - INSCRIPTION_DUST_SATS
+        - estimated_fee_sats;
 
-    // Build inputs.
-    let multisig_input = TxIn {
-        previous_output: OutPoint::new(locking_txid, req.multisig_vout),
-        script_sig: ScriptBuf::new(),
-        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-        witness: Witness::default(),
-    };
-
-    let buyer_txid = Txid::from_str(&req.buyer_utxo_txid)
-        .map_err(|e| anyhow!("invalid buyer_utxo_txid: {}", e))?;
-    let buyer_input = TxIn {
-        previous_output: OutPoint::new(buyer_txid, req.buyer_utxo_vout),
-        script_sig: ScriptBuf::new(),
-        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-        witness: Witness::default(),
-    };
-
-    // Build outputs.
-    let seller_output = TxOut {
-        value: Amount::from_sat(req.price_sats),
-        script_pubkey: seller_addr.script_pubkey(),
-    };
-    let inscription_output = TxOut {
-        value: Amount::from_sat(INSCRIPTION_DUST_SATS),
-        script_pubkey: buyer_addr.script_pubkey(),
-    };
-    let change_output = TxOut {
-        value: Amount::from_sat(change_sats),
-        script_pubkey: buyer_addr.script_pubkey(),
-    };
+    let buyer_txid = Txid::from_str(&req.buyer_funding_input.txid)
+        .map_err(|e| anyhow!("invalid buyer_funding_input.txid: {}", e))?;
 
     let unsigned_tx = Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: LockTime::ZERO,
-        input: vec![multisig_input, buyer_input],
-        output: vec![seller_output, inscription_output, change_output],
+        input: vec![
+            TxIn {
+                previous_output: OutPoint::new(locking_txid, req.multisig_vout),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::default(),
+            },
+            TxIn {
+                previous_output: OutPoint::new(buyer_txid, req.buyer_funding_input.vout),
+                script_sig: ScriptBuf::new(),
+                sequence: parse_sequence(req.buyer_funding_input.sequence),
+                witness: Witness::default(),
+            },
+        ],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(req.price_sats),
+                script_pubkey: seller_addr.script_pubkey(),
+            },
+            TxOut {
+                value: Amount::from_sat(INSCRIPTION_DUST_SATS),
+                script_pubkey: buyer_addr.script_pubkey(),
+            },
+            TxOut {
+                value: Amount::from_sat(change_sats),
+                script_pubkey: buyer_addr.script_pubkey(),
+            },
+        ],
     };
 
     let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)
         .map_err(|e| anyhow!("protected sale PSBT creation failed: {}", e))?;
-
-    // Annotate input 0 (multisig): SIGHASH_SINGLE | ANYONECANPAY, witness_utxo, witness_script.
-    psbt.inputs[0].sighash_type = Some(bitcoin::psbt::PsbtSighashType::from(
+    psbt.inputs[0].sighash_type = Some(PsbtSighashType::from(
         bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
     ));
-    psbt.inputs[0].witness_utxo = Some(multisig_txout.clone());
+    psbt.inputs[0].witness_utxo = Some(multisig_txout);
     psbt.inputs[0].witness_script = Some(witness_script);
-
-    // Annotate input 1 (buyer): witness_utxo.
-    psbt.inputs[1] = PsbtInput {
-        witness_utxo: Some(TxOut {
-            value: Amount::from_sat(req.buyer_utxo_amount_sats),
-            script_pubkey: ScriptBuf::new(), // buyer wallet fills in
-        }),
-        ..Default::default()
-    };
+    add_spendable_input(&mut psbt, 1, &req.buyer_funding_input)?;
 
     Ok(ProtectedSalePsbt {
         psbt_hex: encode_psbt(&psbt),
@@ -578,12 +656,6 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
     })
 }
 
-// ---------------------------------------------------------------------------
-// Mempool protection: marketplace co-signature + finalization
-// ---------------------------------------------------------------------------
-
-/// Apply the marketplace's SIGHASH_ALL co-signature on input 0 of the protected sale PSBT.
-/// This completes the 2-of-2 multisig requirement on the seller's side.
 pub fn apply_marketplace_signature(
     psbt_hex: &str,
     marketplace_keypair: &MarketplaceKeypair,
@@ -601,7 +673,6 @@ pub fn apply_marketplace_signature(
         .clone()
         .ok_or_else(|| anyhow!("input 0 missing witness_utxo"))?;
 
-    // Compute SIGHASH_ALL for input 0.
     let mut sighash_cache = SighashCache::new(&psbt.unsigned_tx);
     let sighash = sighash_cache
         .p2wsh_signature_hash(
@@ -617,7 +688,7 @@ pub fn apply_marketplace_signature(
         .try_into()
         .expect("sighash is always 32 bytes");
     let sig = marketplace_keypair.sign_sighash(&sighash_bytes)?;
-    let ecdsa_sig = bitcoin::ecdsa::Signature {
+    let ecdsa_sig = ecdsa::Signature {
         sig,
         hash_ty: EcdsaSighashType::All,
     };
@@ -634,9 +705,6 @@ pub fn apply_marketplace_signature(
     Ok(encode_psbt(&psbt))
 }
 
-/// Build the final P2WSH witness for input 0: [OP_0, seller_sig, marketplace_sig, redeem_script].
-/// BIP-67 key sort determines sig order (sig for smaller pubkey goes first).
-/// Returns the finalized raw transaction hex ready for broadcast.
 pub fn finalize_multisig_and_extract(
     psbt_hex: &str,
     seller_pubkey_hex: &str,
@@ -648,8 +716,6 @@ pub fn finalize_multisig_and_extract(
         .witness_script
         .clone()
         .ok_or_else(|| anyhow!("input 0 missing witness_script"))?;
-
-    // Find partial sigs for seller and marketplace pubkeys.
     let seller_pk = bitcoin::PublicKey::from_str(seller_pubkey_hex)
         .map_err(|e| anyhow!("invalid seller_pubkey_hex: {}", e))?;
     let marketplace_pk = bitcoin::PublicKey::from_str(marketplace_pubkey_hex)
@@ -666,7 +732,6 @@ pub fn finalize_multisig_and_extract(
         .ok_or_else(|| anyhow!("marketplace signature missing from PSBT input 0"))?
         .clone();
 
-    // BIP-67 sort determines which sig goes first in witness (matches key order in script).
     let (first_sig, second_sig) = {
         let seller_bytes = seller_pk.inner.serialize();
         let marketplace_bytes = marketplace_pk.inner.serialize();
@@ -677,34 +742,18 @@ pub fn finalize_multisig_and_extract(
         }
     };
 
-    // P2WSH OP_CHECKMULTISIG witness: [OP_0 (empty bytes), sig1, sig2, witness_script]
-    let witness = Witness::from_slice(&[
-        &[][..], // OP_0 / dummy for CHECKMULTISIG bug
+    psbt.inputs[0].final_script_witness = Some(Witness::from_slice(&[
+        &[][..],
         &first_sig.to_vec(),
         &second_sig.to_vec(),
         witness_script.as_bytes(),
-    ]);
-
-    psbt.inputs[0].final_script_witness = Some(witness);
+    ]));
     psbt.inputs[0].partial_sigs.clear();
-    psbt.inputs[0].witness_script = None; // moved into final witness
+    psbt.inputs[0].witness_script = None;
+    psbt.inputs[0].sighash_type = None;
 
-    // Finalize remaining inputs (buyer's input).
     for input in psbt.inputs.iter_mut().skip(1) {
-        if input.final_script_sig.is_some() || input.final_script_witness.is_some() {
-            continue;
-        }
-        if !input.partial_sigs.is_empty() {
-            let mut items: Vec<Vec<u8>> = Vec::new();
-            for (pubkey, sig) in &input.partial_sigs {
-                items.push(sig.to_vec());
-                items.push(pubkey.to_bytes());
-            }
-            input.final_script_witness = Some(Witness::from_slice(
-                &items.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
-            ));
-            input.partial_sigs.clear();
-        }
+        finalize_input(input)?;
     }
 
     let final_tx = psbt
@@ -714,31 +763,10 @@ pub fn finalize_multisig_and_extract(
     Ok(hex::encode(raw_bytes))
 }
 
-// ---------------------------------------------------------------------------
-// Locking PSBT finalization helper
-// ---------------------------------------------------------------------------
-
-/// Finalize a seller-signed locking PSBT and return the raw transaction hex.
-/// The locking tx uses standard SIGHASH_ALL (P2WPKH or P2TR input from seller).
-/// We promote partial_sigs to final_script_witness and extract the tx.
 pub fn finalize_locking_psbt(signed_psbt_hex: &str) -> Result<String> {
     let mut psbt = decode_psbt(signed_psbt_hex)?;
-
     for input in psbt.inputs.iter_mut() {
-        if input.final_script_sig.is_some() || input.final_script_witness.is_some() {
-            continue;
-        }
-        if !input.partial_sigs.is_empty() {
-            let mut items: Vec<Vec<u8>> = Vec::new();
-            for (pubkey, sig) in &input.partial_sigs {
-                items.push(sig.to_vec());
-                items.push(pubkey.to_bytes());
-            }
-            input.final_script_witness = Some(Witness::from_slice(
-                &items.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
-            ));
-            input.partial_sigs.clear();
-        }
+        finalize_input(input)?;
     }
 
     let final_tx = psbt
@@ -748,14 +776,9 @@ pub fn finalize_locking_psbt(signed_psbt_hex: &str) -> Result<String> {
     Ok(hex::encode(raw_bytes))
 }
 
-// ---------------------------------------------------------------------------
-// Helpers (keep existing API)
-// ---------------------------------------------------------------------------
-
 pub fn decode_psbt(hex: &str) -> Result<Psbt> {
-    let bytes = hex::decode(hex).map_err(|e| anyhow::anyhow!("invalid hex: {}", e))?;
-    let psbt = Psbt::deserialize(&bytes)?;
-    Ok(psbt)
+    let bytes = hex::decode(hex).map_err(|e| anyhow!("invalid hex: {}", e))?;
+    Psbt::deserialize(&bytes).map_err(Into::into)
 }
 
 pub fn encode_psbt(psbt: &Psbt) -> String {

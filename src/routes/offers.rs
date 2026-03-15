@@ -329,7 +329,11 @@ mod tests {
     use chrono::{Duration, Utc};
     use uuid::Uuid;
 
-    fn make_offer(status: OfferStatus, expires_at: Option<chrono::DateTime<Utc>>, psbt: Option<&str>) -> Offer {
+    fn make_offer(
+        status: OfferStatus,
+        expires_at: Option<chrono::DateTime<Utc>>,
+        psbt: Option<&str>,
+    ) -> Offer {
         let now = Utc::now();
         Offer {
             id: Uuid::new_v4(),
@@ -392,6 +396,29 @@ mod tests {
         match result {
             OfferAcceptanceCheck::Ready(psbt) => assert_eq!(psbt, "signed-psbt"),
             OfferAcceptanceCheck::Expired => panic!("expected ready offer"),
+        }
+    }
+
+    #[test]
+    fn validate_offer_acceptance_allows_offer_expiring_exactly_now() {
+        let now = Utc::now();
+        let offer = make_offer(OfferStatus::Pending, Some(now), Some("signed-psbt"));
+
+        let result = validate_offer_for_acceptance(&offer, now).unwrap();
+        match result {
+            OfferAcceptanceCheck::Ready(psbt) => assert_eq!(psbt, "signed-psbt"),
+            OfferAcceptanceCheck::Expired => panic!("offer should not expire exactly at now"),
+        }
+    }
+
+    #[test]
+    fn validate_offer_acceptance_allows_offer_without_expiry() {
+        let offer = make_offer(OfferStatus::Pending, None, Some("signed-psbt"));
+
+        let result = validate_offer_for_acceptance(&offer, Utc::now()).unwrap();
+        match result {
+            OfferAcceptanceCheck::Ready(psbt) => assert_eq!(psbt, "signed-psbt"),
+            OfferAcceptanceCheck::Expired => panic!("offer without expiry should stay valid"),
         }
     }
 }
