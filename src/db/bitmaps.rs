@@ -11,7 +11,7 @@ impl Database {
         offset: i64,
     ) -> Result<Vec<Bitmap>> {
         let bitmaps = sqlx::query_as::<_, Bitmap>(
-            "SELECT * FROM bitmaps WHERE $1 = ANY(traits) ORDER BY block_height ASC LIMIT $2 OFFSET $3"
+            "SELECT * FROM bitmaps WHERE traits @> ARRAY[$1] ORDER BY block_height ASC LIMIT $2 OFFSET $3"
         )
         .bind(trait_name)
         .bind(limit)
@@ -24,7 +24,7 @@ impl Database {
     /// Count bitmaps by trait for pagination metadata
     pub async fn count_bitmaps_by_trait(&self, trait_name: &str) -> Result<i64> {
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM bitmaps WHERE $1 = ANY(traits)"
+            "SELECT COUNT(*) FROM bitmaps WHERE traits @> ARRAY[$1]"
         )
         .bind(trait_name)
         .fetch_one(&self.pool)
@@ -40,7 +40,7 @@ impl Database {
         offset: i64,
     ) -> Result<Vec<i64>> {
         let heights: Vec<i64> = sqlx::query_scalar(
-            "SELECT block_height FROM bitmaps WHERE $1 = ANY(traits) ORDER BY block_height ASC LIMIT $2 OFFSET $3"
+            "SELECT block_height FROM bitmaps WHERE traits @> ARRAY[$1] ORDER BY block_height ASC LIMIT $2 OFFSET $3"
         )
         .bind(trait_name)
         .bind(limit)

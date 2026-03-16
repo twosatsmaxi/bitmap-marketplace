@@ -56,6 +56,33 @@ fn filter_to_trait(filter: &str) -> Option<&str> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_to_trait_maps_all_valid_filters() {
+        assert_eq!(filter_to_trait("punks"), Some("punk"));
+        assert_eq!(filter_to_trait("palindrome"), Some("palindrome"));
+        assert_eq!(filter_to_trait("sub-100k"), Some("sub_100k"));
+        assert_eq!(filter_to_trait("nakamoto"), Some("nakamoto"));
+        assert_eq!(filter_to_trait("patoshi"), Some("patoshi"));
+        assert_eq!(filter_to_trait("billionaire"), Some("billionaire"));
+        assert_eq!(filter_to_trait("epic-sat"), Some("epic_sat"));
+        assert_eq!(filter_to_trait("pizza"), Some("pizza"));
+        assert_eq!(filter_to_trait("pristine-punk"), Some("pristine_punk"));
+        assert_eq!(filter_to_trait("perfect-punk"), Some("perfect_punk"));
+        assert_eq!(filter_to_trait("same-digits"), Some("same_digits"));
+    }
+
+    #[test]
+    fn filter_to_trait_returns_none_for_invalid() {
+        assert_eq!(filter_to_trait("unknown"), None);
+        assert_eq!(filter_to_trait(""), None);
+        assert_eq!(filter_to_trait("punk"), None); // singular not valid
+    }
+}
+
 pub async fn get_explore_blocks(
     State(state): State<AppState>,
     Query(query): Query<ExploreQuery>,
