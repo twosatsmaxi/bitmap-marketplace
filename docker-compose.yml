@@ -1,0 +1,25 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/arm64
+      tags:
+        - ghcr.io/twosatsmaxi/bitmap-marketplace:latest
+    image: ghcr.io/twosatsmaxi/bitmap-marketplace:latest
+    container_name: bitmap-marketplace
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      BITCOIN_RPC_URL: ${BITCOIN_RPC_URL:-http://host.docker.internal:8332}
+      BITCOIN_RPC_USER: ${BITCOIN_RPC_USER:-bitcoin}
+      BITCOIN_RPC_PASS: ${BITCOIN_RPC_PASS:-bitcoin}
+      ORD_URL: ${ORD_URL:-http://host.docker.internal:80}
+      MARKETPLACE_SECRET_KEY: ${MARKETPLACE_SECRET_KEY}
+      RENDER_API_BASE: ${RENDER_API_BASE:-http://host.docker.internal:3020}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-change-me}
+      PORT: "3000"
+      RUST_LOG: bitmap_marketplace=info,tower_http=info
+    restart: unless-stopped
