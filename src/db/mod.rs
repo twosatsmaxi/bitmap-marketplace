@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use std::time::Duration;
 
 pub mod activity;
+pub mod bitmaps;
 pub mod collections;
 pub mod inscriptions;
 pub mod listings;
