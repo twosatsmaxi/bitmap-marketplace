@@ -51,6 +51,8 @@ fn filter_to_trait(filter: &str) -> Option<&str> {
         "pizza" => Some("pizza"),
         "pristine-punk" => Some("pristine_punk"),
         "perfect-punk" => Some("perfect_punk"),
+        "standard-punk" => Some("standard_punk"),
+        "wide-neck-punk" => Some("wide_neck_punk"),
         "same-digits" => Some("same_digits"),
         _ => None,
     }
@@ -72,6 +74,8 @@ mod tests {
         assert_eq!(filter_to_trait("pizza"), Some("pizza"));
         assert_eq!(filter_to_trait("pristine-punk"), Some("pristine_punk"));
         assert_eq!(filter_to_trait("perfect-punk"), Some("perfect_punk"));
+        assert_eq!(filter_to_trait("standard-punk"), Some("standard_punk"));
+        assert_eq!(filter_to_trait("wide-neck-punk"), Some("wide_neck_punk"));
         assert_eq!(filter_to_trait("same-digits"), Some("same_digits"));
     }
 
