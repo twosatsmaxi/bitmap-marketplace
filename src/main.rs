@@ -24,6 +24,7 @@ pub mod ws;
 
 use crate::db::Database;
 use crate::services::marketplace_keypair::MarketplaceKeypair;
+use crate::services::ord::OrdClient;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -31,6 +32,7 @@ pub struct AppState {
     pub ws_broadcaster: Arc<ws::WsBroadcaster>,
     pub marketplace_keypair: Arc<MarketplaceKeypair>,
     pub http_client: reqwest::Client,
+    pub ord_client: OrdClient,
     pub render_api_base: String,
     pub network: Network,
 }
@@ -115,6 +117,7 @@ async fn main() -> Result<()> {
         ws_broadcaster: ws_broadcaster.clone(),
         marketplace_keypair,
         http_client: reqwest::Client::new(),
+        ord_client: OrdClient::new(),
         render_api_base,
         network,
     };
