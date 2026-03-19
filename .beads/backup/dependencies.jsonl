@@ -24,6 +24,8 @@
 {"created_at":"2026-03-10T11:46:00Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-tll","issue_id":"bitmap-marketplace-l3h","type":"blocks"}
 {"created_at":"2026-03-10T11:46:00Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-wb9","issue_id":"bitmap-marketplace-l3h","type":"blocks"}
 {"created_at":"2026-03-15T05:37:38Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-e8u","issue_id":"bitmap-marketplace-lwv","type":"blocks"}
+{"created_at":"2026-03-19T17:02:19Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-ml5","issue_id":"bitmap-marketplace-ml5.1","type":"parent-child"}
+{"created_at":"2026-03-19T17:02:20Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-ml5","issue_id":"bitmap-marketplace-ml5.2","type":"parent-child"}
 {"created_at":"2026-03-15T05:37:38Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-e8u","issue_id":"bitmap-marketplace-mrv","type":"blocks"}
 {"created_at":"2026-03-15T04:16:09Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-e0t","issue_id":"bitmap-marketplace-o1a","type":"blocks"}
 {"created_at":"2026-03-15T05:37:38Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-e1e","issue_id":"bitmap-marketplace-ydg","type":"blocks"}

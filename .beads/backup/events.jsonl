@@ -152,3 +152,9 @@
 {"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-17T10:32:11Z","event_type":"created","id":152,"issue_id":"bitmap-marketplace-b2j","new_value":"","old_value":""}
 {"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-17T10:38:46Z","event_type":"closed","id":153,"issue_id":"bitmap-marketplace-b2j","new_value":"Wrong repo - recreating in bitmap-render","old_value":""}
 {"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-19T17:01:56Z","event_type":"created","id":154,"issue_id":"bitmap-marketplace-ml5","new_value":"","old_value":""}
+{"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-19T17:02:19Z","event_type":"created","id":155,"issue_id":"bitmap-marketplace-ml5.1","new_value":"","old_value":""}
+{"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-19T17:02:20Z","event_type":"created","id":156,"issue_id":"bitmap-marketplace-ml5.2","new_value":"","old_value":""}
+{"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-19T17:13:05Z","event_type":"closed","id":157,"issue_id":"bitmap-marketplace-ml5.1","new_value":"Implemented proxy_batch_block_meta route in explore.rs","old_value":""}
+{"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-19T17:13:05Z","event_type":"closed","id":158,"issue_id":"bitmap-marketplace-ml5.2","new_value":"Implemented proxy_batch_block_data route in explore.rs","old_value":""}
+{"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-19T17:13:05Z","event_type":"closed","id":159,"issue_id":"bitmap-marketplace-ml5","new_value":"all steps complete","old_value":""}
+{"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-19T17:13:06Z","event_type":"closed","id":160,"issue_id":"bitmap-marketplace-ml5","new_value":"Both batch proxy routes implemented and tested","old_value":""}
