@@ -9,6 +9,7 @@ mod inscriptions;
 mod listings;
 mod offers;
 mod orders;
+mod portfolio;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -20,4 +21,5 @@ pub fn router() -> Router<AppState> {
         .nest("/listings", listings::router())
         .nest("/offers", offers::router())
         .nest("/orders", orders::router())
+        .nest("/portfolio", portfolio::router())
 }

@@ -1,6 +1,5 @@
 use crate::{
     errors::{AppError, AppResult},
-    services::ord::OrdClient,
     AppState,
 };
 use axum::{
@@ -18,7 +17,6 @@ pub fn router() -> Router<AppState> {
 struct BitmapDetailsResponse {
     block_height: i64,
     inscription_id: String,
-    inscription_number: i64,
     owner: String,
     traits: Vec<String>,
     children_count: usize,
@@ -42,14 +40,8 @@ async fn get_bitmap_details(
         .inscription_id
         .ok_or_else(|| AppError::NotFound(format!("No inscription for block {}", block_height)))?;
 
-    // Get inscription_number from bitmap (mapped to inscription_number in response)
-    let inscription_number = bitmap
-        .inscription_num
-        .ok_or_else(|| AppError::NotFound(format!("No inscription number for block {}", block_height)))?;
-
     // Call OrdClient to get inscription details
-    let ord_client = OrdClient::new();
-    let ord_inscription = ord_client
+    let ord_inscription = state.ord_client
         .get_inscription(&inscription_id)
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
@@ -59,20 +51,19 @@ async fn get_bitmap_details(
         .address
         .ok_or_else(|| AppError::NotFound(format!("No owner address for inscription {}", inscription_id)))?;
 
-    // Genesis height from ord response (convert u64 to i64)
+    // Genesis height from ord response (use height field, fallback to genesis_height, then 0)
     let genesis_height = ord_inscription
-        .genesis_height
+        .height
+        .or(ord_inscription.genesis_height)
         .map(|h| h as i64)
         .unwrap_or(0);
 
-    // Children count - ord API doesn't expose children directly in get_inscription
-    // Returning 0 as placeholder; would need separate API call if children data needed
-    let children_count = 0;
+    // Children count from ord response
+    let children_count = ord_inscription.child_count as usize;
 
     Ok(Json(BitmapDetailsResponse {
         block_height,
         inscription_id,
-        inscription_number,
         owner,
         traits: bitmap.traits,
         children_count,
@@ -89,7 +80,6 @@ mod tests {
         let resp = BitmapDetailsResponse {
             block_height: 800000,
             inscription_id: "abc123i0".to_string(),
-            inscription_number: 42,
             owner: "bc1pxxx".to_string(),
             traits: vec!["pristine_punk".to_string(), "perfect_punk".to_string()],
             children_count: 5,
@@ -99,7 +89,6 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["block_height"], 800000);
         assert_eq!(json["inscription_id"], "abc123i0");
-        assert_eq!(json["inscription_number"], 42);
         assert_eq!(json["owner"], "bc1pxxx");
         assert_eq!(json["children_count"], 5);
         assert_eq!(json["genesis_height"], 800000);

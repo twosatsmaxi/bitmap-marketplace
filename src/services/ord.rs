@@ -18,10 +18,15 @@ pub struct OrdInscription {
     pub content_length: Option<u64>,
     /// The sat on which this inscription is written.
     pub sat: Option<u64>,
+    /// The block height where this inscription was created.
+    pub height: Option<u64>,
     pub genesis_height: Option<u64>,
     pub genesis_timestamp: Option<i64>,
     /// Output value of the UTXO holding the inscription.
     pub value: Option<u64>,
+    /// Number of child inscriptions.
+    #[serde(default)]
+    pub child_count: u64,
 }
 
 /// A page of inscription IDs as returned by GET /inscriptions?page={n}
@@ -31,6 +36,13 @@ pub struct InscriptionPage {
     pub page_index: u32,
     pub more: bool,
     pub page_size: u32,
+}
+
+/// Address info as returned by GET /address/{addr}
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrdAddressResponse {
+    #[serde(default)]
+    pub inscriptions: Vec<String>,
 }
 
 /// Sat info as returned by GET /sat/{n}
@@ -57,6 +69,7 @@ pub struct SatInfo {
 // ---------------------------------------------------------------------------
 
 /// HTTP client for the ord REST API.
+#[derive(Clone)]
 pub struct OrdClient {
     base_url: String,
     http: Client,
@@ -191,6 +204,16 @@ impl OrdClient {
         }
 
         Ok(inscriptions)
+    }
+
+    /// Fetch all inscription IDs owned by a Bitcoin address.
+    ///
+    /// Calls `GET /address/{address}` and returns just the inscription IDs.
+    pub async fn get_address_inscription_ids(&self, address: &str) -> Result<Vec<String>> {
+        let resp = self
+            .get_json::<OrdAddressResponse>(&format!("/address/{address}"))
+            .await?;
+        Ok(resp.inscriptions)
     }
 
     /// Fetch sat metadata by sat number.

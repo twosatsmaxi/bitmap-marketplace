@@ -101,6 +101,35 @@ impl Database {
         Ok(count)
     }
 
+    /// Get bitmaps by inscription IDs with pagination (excludes encoded_bytes)
+    pub async fn get_bitmaps_by_inscription_ids(
+        &self,
+        ids: &[String],
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Bitmap>> {
+        let bitmaps = sqlx::query_as::<_, Bitmap>(
+            "SELECT block_height, inscription_id, inscription_num, NULL::bytea as encoded_bytes, tx_count, block_timestamp, traits, created_at, updated_at \
+             FROM bitmaps WHERE inscription_id = ANY($1) ORDER BY block_height ASC LIMIT $2 OFFSET $3",
+        )
+        .bind(ids)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(bitmaps)
+    }
+
+    /// Count bitmaps matching given inscription IDs
+    pub async fn count_bitmaps_by_inscription_ids(&self, ids: &[String]) -> Result<i64> {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM bitmaps WHERE inscription_id = ANY($1)")
+                .bind(ids)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count)
+    }
+
     /// Get just block heights by trait (lightweight for explore endpoint)
     pub async fn get_block_heights_by_trait(
         &self,
