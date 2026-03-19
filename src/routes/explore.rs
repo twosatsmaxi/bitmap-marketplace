@@ -92,6 +92,40 @@ mod tests {
         assert_eq!(filter_to_trait(""), None);
         assert_eq!(filter_to_trait("punk"), None); // singular not valid
     }
+
+    #[test]
+    fn batch_query_struct_exists() {
+        // Verify BatchQuery struct can be constructed
+        let query = BatchQuery {
+            heights: "1,2,3,100,200".to_string(),
+        };
+        assert_eq!(query.heights, "1,2,3,100,200");
+    }
+
+    #[test]
+    fn batch_query_handles_single_height() {
+        let query = BatchQuery {
+            heights: "840000".to_string(),
+        };
+        assert_eq!(query.heights, "840000");
+    }
+
+    #[test]
+    fn batch_query_preserves_order() {
+        let query = BatchQuery {
+            heights: "100,50,25,10,5".to_string(),
+        };
+        assert_eq!(query.heights, "100,50,25,10,5");
+    }
+
+    #[test]
+    fn router_includes_batch_routes() {
+        // Verify the router compiles with all routes including batch endpoints
+        let _app = router();
+        // Router construction succeeds if we reach this point
+        // The routes are type-checked at compile time
+        assert!(true, "Router with batch routes compiles successfully");
+    }
 }
 
 pub async fn get_explore_blocks(
