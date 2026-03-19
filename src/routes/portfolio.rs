@@ -17,10 +17,18 @@ pub struct PortfolioQuery {
     pub page: u64,
     #[serde(default = "default_limit")]
     pub limit: u64,
+    /// Filter by trait (optional)
+    pub trait_filter: Option<String>,
 }
 
 fn default_limit() -> u64 {
     24
+}
+
+#[derive(Debug, Serialize)]
+pub struct TraitStat {
+    pub name: String,
+    pub count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,6 +45,7 @@ pub struct PortfolioBitmapItem {
 pub struct PortfolioResponse {
     pub address: String,
     pub bitmaps: Vec<PortfolioBitmapItem>,
+    pub traits: Vec<TraitStat>,
     pub total: i64,
     pub page: u64,
     pub has_more: bool,
@@ -62,25 +71,55 @@ async fn get_portfolio(
         return Ok(Json(PortfolioResponse {
             address,
             bitmaps: vec![],
+            traits: vec![],
             total: 0,
             page,
             has_more: false,
         }));
     }
 
-    // Count how many of those inscriptions are bitmaps
-    let total = state
+    // Get trait counts for all user's bitmaps
+    let trait_stats: Vec<TraitStat> = state
         .db
-        .count_bitmaps_by_inscription_ids(&inscription_ids)
+        .get_trait_counts_by_inscription_ids(&inscription_ids)
         .await
-        .map_err(AppError::Internal)?;
+        .map_err(AppError::Internal)?
+        .into_iter()
+        .map(|(name, count)| TraitStat { name, count })
+        .collect();
 
-    // Fetch the paginated subset
-    let bitmaps = state
-        .db
-        .get_bitmaps_by_inscription_ids(&inscription_ids, limit, offset)
-        .await
-        .map_err(AppError::Internal)?;
+    // Apply trait filter if specified
+    let (bitmaps, total) = if let Some(ref trait_filter) = query.trait_filter {
+        // Get bitmaps matching the trait
+        let filtered_bitmaps = state
+            .db
+            .get_bitmaps_by_inscription_ids_and_trait(&inscription_ids, trait_filter, limit, offset)
+            .await
+            .map_err(AppError::Internal)?;
+        
+        let filtered_total = state
+            .db
+            .count_bitmaps_by_inscription_ids_and_trait(&inscription_ids, trait_filter)
+            .await
+            .map_err(AppError::Internal)?;
+        
+        (filtered_bitmaps, filtered_total)
+    } else {
+        // No filter - get all bitmaps
+        let total = state
+            .db
+            .count_bitmaps_by_inscription_ids(&inscription_ids)
+            .await
+            .map_err(AppError::Internal)?;
+        
+        let bitmaps = state
+            .db
+            .get_bitmaps_by_inscription_ids(&inscription_ids, limit, offset)
+            .await
+            .map_err(AppError::Internal)?;
+        
+        (bitmaps, total)
+    };
 
     let has_more = (offset + bitmaps.len() as i64) < total;
 
@@ -99,6 +138,7 @@ async fn get_portfolio(
     Ok(Json(PortfolioResponse {
         address,
         bitmaps: items,
+        traits: trait_stats,
         total,
         page,
         has_more,

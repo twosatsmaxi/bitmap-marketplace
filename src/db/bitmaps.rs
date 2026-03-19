@@ -167,4 +167,99 @@ impl Database {
         };
         Ok(heights)
     }
+
+    /// Get trait counts for a set of inscription IDs (for portfolio stats)
+    pub async fn get_trait_counts_by_inscription_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<(String, i64)>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT trait, COUNT(*) as count FROM (
+                SELECT unnest(traits) as trait FROM bitmaps WHERE inscription_id = ANY($1)
+            ) t GROUP BY trait ORDER BY count DESC"
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Get bitmaps by inscription IDs filtered by trait
+    pub async fn get_bitmaps_by_inscription_ids_and_trait(
+        &self,
+        ids: &[String],
+        trait_name: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Bitmap>> {
+        let bitmaps = if trait_name == "punk" {
+            sqlx::query_as::<_, Bitmap>(
+                "SELECT block_height, inscription_id, inscription_num, NULL::bytea as encoded_bytes, tx_count, block_timestamp, traits, created_at, updated_at \
+                 FROM bitmaps WHERE inscription_id = ANY($1) AND traits && $2 ORDER BY block_height ASC LIMIT $3 OFFSET $4",
+            )
+            .bind(ids)
+            .bind(PUNK_TRAITS)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?
+        } else if trait_name == "perfect_punk" {
+            sqlx::query_as::<_, Bitmap>(
+                "SELECT block_height, inscription_id, inscription_num, NULL::bytea as encoded_bytes, tx_count, block_timestamp, traits, created_at, updated_at \
+                 FROM bitmaps WHERE inscription_id = ANY($1) AND traits && $2 ORDER BY block_height ASC LIMIT $3 OFFSET $4",
+            )
+            .bind(ids)
+            .bind(PERFECT_PUNK_TRAITS)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, Bitmap>(
+                "SELECT block_height, inscription_id, inscription_num, NULL::bytea as encoded_bytes, tx_count, block_timestamp, traits, created_at, updated_at \
+                 FROM bitmaps WHERE inscription_id = ANY($1) AND traits @> ARRAY[$2] ORDER BY block_height ASC LIMIT $3 OFFSET $4",
+            )
+            .bind(ids)
+            .bind(trait_name)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(bitmaps)
+    }
+
+    /// Count bitmaps by inscription IDs filtered by trait
+    pub async fn count_bitmaps_by_inscription_ids_and_trait(
+        &self,
+        ids: &[String],
+        trait_name: &str,
+    ) -> Result<i64> {
+        let count: i64 = if trait_name == "punk" {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM bitmaps WHERE inscription_id = ANY($1) AND traits && $2"
+            )
+            .bind(ids)
+            .bind(PUNK_TRAITS)
+            .fetch_one(&self.pool)
+            .await?
+        } else if trait_name == "perfect_punk" {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM bitmaps WHERE inscription_id = ANY($1) AND traits && $2"
+            )
+            .bind(ids)
+            .bind(PERFECT_PUNK_TRAITS)
+            .fetch_one(&self.pool)
+            .await?
+        } else {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM bitmaps WHERE inscription_id = ANY($1) AND traits @> ARRAY[$2]"
+            )
+            .bind(ids)
+            .bind(trait_name)
+            .fetch_one(&self.pool)
+            .await?
+        };
+        Ok(count)
+    }
 }
