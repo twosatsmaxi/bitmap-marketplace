@@ -150,3 +150,5 @@
 {"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-17T10:17:31Z","event_type":"created","id":150,"issue_id":"bitmap-marketplace-bz9","new_value":"","old_value":""}
 {"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-17T10:24:46Z","event_type":"closed","id":151,"issue_id":"bitmap-marketplace-bz9","new_value":"Not needed for minimal implementation - can use existing getBitmap() from frontend","old_value":""}
 {"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-17T10:32:11Z","event_type":"created","id":152,"issue_id":"bitmap-marketplace-b2j","new_value":"","old_value":""}
+{"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-17T10:38:46Z","event_type":"closed","id":153,"issue_id":"bitmap-marketplace-b2j","new_value":"Wrong repo - recreating in bitmap-render","old_value":""}
+{"actor":"twosatsmaxi","comment":null,"created_at":"2026-03-19T17:01:56Z","event_type":"created","id":154,"issue_id":"bitmap-marketplace-ml5","new_value":"","old_value":""}
