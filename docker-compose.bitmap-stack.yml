@@ -1,7 +1,7 @@
 services:
   bitmap-marketplace:
     image: ghcr.io/twosatsmaxi/bitmap-marketplace:latest
-    container_name: bitmap-marketplace-api
+    container_name: bitmap-marketplace
     ports:
       - "3000:3000"
     extra_hosts:
