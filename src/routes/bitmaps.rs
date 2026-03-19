@@ -20,6 +20,7 @@ struct BitmapDetailsResponse {
     owner: String,
     traits: Vec<String>,
     children_count: usize,
+    children: Vec<String>,
     genesis_height: i64,
 }
 
@@ -58,8 +59,9 @@ async fn get_bitmap_details(
         .map(|h| h as i64)
         .unwrap_or(0);
 
-    // Children count from ord response
+    // Children count and IDs from ord response
     let children_count = ord_inscription.child_count as usize;
+    let children = ord_inscription.children;
 
     Ok(Json(BitmapDetailsResponse {
         block_height,
@@ -67,6 +69,7 @@ async fn get_bitmap_details(
         owner,
         traits: bitmap.traits,
         children_count,
+        children,
         genesis_height,
     }))
 }
@@ -83,6 +86,7 @@ mod tests {
             owner: "bc1pxxx".to_string(),
             traits: vec!["pristine_punk".to_string(), "perfect_punk".to_string()],
             children_count: 5,
+            children: vec!["child1i0".to_string(), "child2i0".to_string()],
             genesis_height: 800000,
         };
 

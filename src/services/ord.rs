@@ -27,6 +27,9 @@ pub struct OrdInscription {
     /// Number of child inscriptions.
     #[serde(default)]
     pub child_count: u64,
+    /// Child inscription IDs.
+    #[serde(default)]
+    pub children: Vec<String>,
 }
 
 /// A page of inscription IDs as returned by GET /inscriptions?page={n}
