@@ -15,7 +15,26 @@ use bitcoin::{
 };
 use std::str::FromStr;
 
+use crate::models::listing::SpendableInputRequest;
 use crate::services::marketplace_keypair::MarketplaceKeypair;
+
+impl From<&SpendableInputRequest> for SpendableInput {
+    fn from(req: &SpendableInputRequest) -> Self {
+        SpendableInput {
+            txid: req.txid.clone(),
+            vout: req.vout,
+            value_sats: req.value_sats,
+            witness_utxo: WitnessUtxo {
+                script_pubkey_hex: req.witness_utxo.script_pubkey_hex.clone(),
+                value_sats: req.witness_utxo.value_sats,
+            },
+            non_witness_utxo_hex: req.non_witness_utxo_hex.clone(),
+            redeem_script_hex: req.redeem_script_hex.clone(),
+            witness_script_hex: req.witness_script_hex.clone(),
+            sequence: req.sequence,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct WitnessUtxo {

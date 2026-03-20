@@ -2,11 +2,11 @@ use crate::{
     db::listings::{ListingFilter, ListingSort},
     errors::{AppError, AppResult},
     models::activity::{Activity, ActivityType},
-    models::listing::{CreateListingRequest, Listing, ListingStatus, SpendableInputRequest},
+    models::listing::{CreateListingRequest, Listing, ListingStatus},
     services::magic_eden,
     services::psbt::{
         build_locking_psbt, decode_psbt, extract_seller_sale_sig, LockingPsbtRequest,
-        SpendableInput, WitnessUtxo,
+        SpendableInput,
     },
     ws::WsEvent,
     AppState,
@@ -20,22 +20,6 @@ use bitcoin::secp256k1::PublicKey;
 use serde::{Deserialize, Deserializer};
 use std::str::FromStr;
 use uuid::Uuid;
-
-fn map_spendable_input(input: &SpendableInputRequest) -> SpendableInput {
-    SpendableInput {
-        txid: input.txid.clone(),
-        vout: input.vout,
-        value_sats: input.value_sats,
-        witness_utxo: WitnessUtxo {
-            script_pubkey_hex: input.witness_utxo.script_pubkey_hex.clone(),
-            value_sats: input.witness_utxo.value_sats,
-        },
-        non_witness_utxo_hex: input.non_witness_utxo_hex.clone(),
-        redeem_script_hex: input.redeem_script_hex.clone(),
-        witness_script_hex: input.witness_script_hex.clone(),
-        sequence: input.sequence,
-    }
-}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -163,8 +147,8 @@ async fn create_listing(
             })?;
 
             let locking_req = LockingPsbtRequest {
-                inscription_input: map_spendable_input(inscription_input),
-                gas_funding_input: req.gas_funding_input.as_ref().map(map_spendable_input),
+                inscription_input: SpendableInput::from(inscription_input),
+                gas_funding_input: req.gas_funding_input.as_ref().map(SpendableInput::from),
                 seller_pubkey_hex: seller_pubkey_hex.clone(),
                 marketplace_pubkey_hex: state.marketplace_keypair.pubkey_hex(),
                 network: state.network,

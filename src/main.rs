@@ -35,6 +35,8 @@ pub struct AppState {
     pub ord_client: OrdClient,
     pub render_api_base: String,
     pub network: Network,
+    pub marketplace_fee_address: Option<String>,
+    pub marketplace_fee_bps: u64,
 }
 
 #[tokio::main]
@@ -112,6 +114,12 @@ async fn main() -> Result<()> {
     let render_api_base =
         std::env::var("RENDER_API_BASE").unwrap_or_else(|_| "http://r2d2.local:3020".to_string());
 
+    let marketplace_fee_address = std::env::var("MARKETPLACE_FEE_ADDRESS").ok();
+    let marketplace_fee_bps: u64 = std::env::var("MARKETPLACE_FEE_BPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
     let state = AppState {
         db,
         ws_broadcaster: ws_broadcaster.clone(),
@@ -120,6 +128,8 @@ async fn main() -> Result<()> {
         ord_client: OrdClient::new(),
         render_api_base,
         network,
+        marketplace_fee_address,
+        marketplace_fee_bps,
     };
 
     // Per-IP rate limiting config.

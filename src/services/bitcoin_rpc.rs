@@ -152,6 +152,26 @@ impl BitcoinRpc {
         Ok(info.chain)
     }
 
+    /// Verifies that all inputs of a raw transaction hex are still unspent UTXOs.
+    /// Returns an error describing the first spent input found.
+    pub fn verify_inputs_unspent(&self, raw_tx_hex: &str) -> Result<()> {
+        let raw_bytes = hex::decode(raw_tx_hex)
+            .map_err(|e| anyhow!("invalid tx hex: {}", e))?;
+        let tx: Transaction = deserialize(&raw_bytes)
+            .map_err(|e| anyhow!("invalid transaction: {}", e))?;
+        for input in &tx.input {
+            let txid = input.previous_output.txid.to_string();
+            let vout = input.previous_output.vout;
+            if self.get_utxo_info(&txid, vout)?.is_none() {
+                return Err(anyhow!(
+                    "locking tx input {}:{} is already spent; seller may have moved the inscription",
+                    txid, vout
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Submit a package of transactions atomically via `submitpackage` RPC (Bitcoin Core v25+).
     /// `txns` is a slice of raw transaction hex strings; the first should be the parent (locking tx),
     /// the second the child (sale tx).
