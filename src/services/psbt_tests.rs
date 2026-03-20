@@ -1,13 +1,14 @@
 use super::{
-    build_buy_psbt, build_listing_psbt, build_locking_psbt, build_multisig_redeem_script,
-    build_protected_sale_psbt, decode_psbt, encode_psbt, finalize_locking_psbt,
+    build_buy_psbt, build_listing_psbt, build_locking_psbt, build_protected_sale_psbt,
+    create_taproot_multisig, decode_psbt, encode_psbt, finalize_locking_psbt,
     finalize_multisig_and_extract, BuyRequest, ListingRequest, LockingPsbtRequest,
     ProtectedSalePsbtRequest, SpendableInput, WitnessUtxo, MIN_SELF_FUNDED,
 };
 use bitcoin::{
-    ecdsa, key::TapTweak, psbt::Psbt, secp256k1, sighash::SighashCache, taproot, Address, Amount,
-    Network, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+    ecdsa, hashes::Hash, key::TapTweak, psbt::Psbt, secp256k1, sighash::SighashCache, taproot,
+    Address, Amount, Network, ScriptBuf, Sequence, TapLeafHash, Transaction, TxIn, TxOut, Witness,
 };
+use bitcoin::taproot::LeafVersion;
 use std::str::FromStr;
 
 const FAKE_TXID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -290,9 +291,19 @@ fn protected_sale_psbt_populates_multisig_and_buyer_metadata() {
     let marketplace_secret = secret_key(16);
     let seller_pubkey = bitcoin_pubkey(&seller_secret);
     let marketplace_pubkey = bitcoin_pubkey(&marketplace_secret);
-    let witness_script =
-        build_multisig_redeem_script(&seller_pubkey.inner, &marketplace_pubkey.inner);
-    let multisig_address = Address::p2wsh(&witness_script, Network::Bitcoin);
+
+    // Create Taproot 2-of-2 multisig
+    let secp = secp256k1::Secp256k1::new();
+    let seller_keypair = secp256k1::Keypair::from_secret_key(&secp, &seller_secret);
+    let (seller_xonly, _) = secp256k1::XOnlyPublicKey::from_keypair(&seller_keypair);
+    let multisig = create_taproot_multisig(
+        &seller_pubkey.inner,
+        &marketplace_pubkey.inner,
+        seller_xonly, // Use seller x-only as internal key
+        Network::Bitcoin,
+    )
+    .unwrap();
+
     let locking_tx = Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: bitcoin::absolute::LockTime::ZERO,
@@ -304,7 +315,7 @@ fn protected_sale_psbt_populates_multisig_and_buyer_metadata() {
         }],
         output: vec![TxOut {
             value: Amount::from_sat(10_000),
-            script_pubkey: multisig_address.script_pubkey(),
+            script_pubkey: multisig.output_script.clone(),
         }],
     };
     let buyer_input = spendable_input(FAKE_TXID_2, 1, 100_000, p2wpkh_script(&secret_key(17)));
@@ -312,7 +323,7 @@ fn protected_sale_psbt_populates_multisig_and_buyer_metadata() {
     let result = build_protected_sale_psbt(&ProtectedSalePsbtRequest {
         locking_raw_tx_hex: hex::encode(bitcoin::consensus::encode::serialize(&locking_tx)),
         multisig_vout: 0,
-        multisig_script_hex: hex::encode(witness_script.as_bytes()),
+        multisig_script_hex: hex::encode(multisig.leaf_script.as_bytes()),
         seller_address: SELLER_ADDR.to_string(),
         seller_pubkey_hex: seller_pubkey.to_string(),
         price_sats: 50_000,
@@ -326,10 +337,8 @@ fn protected_sale_psbt_populates_multisig_and_buyer_metadata() {
     .unwrap();
     let psbt = decode_psbt(&result.psbt_hex).unwrap();
 
-    assert_eq!(
-        psbt.inputs[0].witness_script.as_ref().unwrap(),
-        &witness_script
-    );
+    // Taproot script-path: check tap_scripts instead of witness_script
+    assert!(!psbt.inputs[0].tap_scripts.is_empty());
     assert_eq!(
         psbt.inputs[1].witness_utxo.as_ref().unwrap().value.to_sat(),
         buyer_input.value_sats
@@ -392,8 +401,18 @@ fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
     let seller_pubkey = bitcoin_pubkey(&seller_secret);
     let marketplace_pubkey = bitcoin_pubkey(&marketplace_secret);
     let buyer_pubkey = bitcoin_pubkey(&buyer_secret);
-    let witness_script =
-        build_multisig_redeem_script(&seller_pubkey.inner, &marketplace_pubkey.inner);
+
+    // Create Taproot 2-of-2 multisig
+    let seller_keypair = secp256k1::Keypair::from_secret_key(&secp, &seller_secret);
+    let (seller_xonly, _) = secp256k1::XOnlyPublicKey::from_keypair(&seller_keypair);
+    let multisig = create_taproot_multisig(
+        &seller_pubkey.inner,
+        &marketplace_pubkey.inner,
+        seller_xonly,
+        Network::Bitcoin,
+    )
+    .unwrap();
+
     let locking_tx = Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: bitcoin::absolute::LockTime::ZERO,
@@ -405,7 +424,7 @@ fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
         }],
         output: vec![TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Address::p2wsh(&witness_script, Network::Bitcoin).script_pubkey(),
+            script_pubkey: multisig.output_script.clone(),
         }],
     };
     let buyer_input = spendable_input(FAKE_TXID_2, 1, 200_000, p2wpkh_script(&buyer_secret));
@@ -413,7 +432,7 @@ fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
         &build_protected_sale_psbt(&ProtectedSalePsbtRequest {
             locking_raw_tx_hex: hex::encode(bitcoin::consensus::encode::serialize(&locking_tx)),
             multisig_vout: 0,
-            multisig_script_hex: hex::encode(witness_script.as_bytes()),
+            multisig_script_hex: hex::encode(multisig.leaf_script.as_bytes()),
             seller_address: SELLER_ADDR.to_string(),
             seller_pubkey_hex: seller_pubkey.to_string(),
             price_sats: 50_000,
@@ -429,43 +448,57 @@ fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
     )
     .unwrap();
 
+    let leaf_hash = TapLeafHash::from_script(&multisig.leaf_script, LeafVersion::TapScript);
+    let prevouts = vec![
+        psbt.inputs[0].witness_utxo.clone().unwrap(),
+        psbt.inputs[1].witness_utxo.clone().unwrap(),
+    ];
+
+    // Seller signs with SIGHASH_SINGLE|ANYONECANPAY via Schnorr script-path
     let seller_sighash = SighashCache::new(&psbt.unsigned_tx)
-        .p2wsh_signature_hash(
+        .taproot_script_spend_signature_hash(
             0,
-            &witness_script,
-            psbt.inputs[0].witness_utxo.as_ref().unwrap().value,
-            bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
+            &bitcoin::sighash::Prevouts::All(&prevouts),
+            leaf_hash,
+            bitcoin::sighash::TapSighashType::SinglePlusAnyoneCanPay,
         )
         .unwrap();
-    let seller_sig = secp.sign_ecdsa(&secp256k1::Message::from(seller_sighash), &seller_secret);
-    psbt.inputs[0].partial_sigs.insert(
-        seller_pubkey,
-        ecdsa::Signature {
-            sig: seller_sig,
-            hash_ty: bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
-        },
+    let seller_schnorr_sig = secp.sign_schnorr(
+        &secp256k1::Message::from_digest(seller_sighash.to_byte_array()),
+        &seller_keypair,
     );
+    let seller_tap_sig = taproot::Signature {
+        sig: seller_schnorr_sig,
+        hash_ty: bitcoin::sighash::TapSighashType::SinglePlusAnyoneCanPay,
+    };
+    psbt.inputs[0]
+        .tap_script_sigs
+        .insert((seller_xonly, leaf_hash), seller_tap_sig);
 
+    // Marketplace signs with SIGHASH_ALL via Schnorr script-path
+    let marketplace_keypair = secp256k1::Keypair::from_secret_key(&secp, &marketplace_secret);
+    let (marketplace_xonly, _) = secp256k1::XOnlyPublicKey::from_keypair(&marketplace_keypair);
     let marketplace_sighash = SighashCache::new(&psbt.unsigned_tx)
-        .p2wsh_signature_hash(
+        .taproot_script_spend_signature_hash(
             0,
-            &witness_script,
-            psbt.inputs[0].witness_utxo.as_ref().unwrap().value,
-            bitcoin::EcdsaSighashType::All,
+            &bitcoin::sighash::Prevouts::All(&prevouts),
+            leaf_hash,
+            bitcoin::sighash::TapSighashType::All,
         )
         .unwrap();
-    let marketplace_sig = secp.sign_ecdsa(
-        &secp256k1::Message::from(marketplace_sighash),
-        &marketplace_secret,
+    let marketplace_schnorr_sig = secp.sign_schnorr(
+        &secp256k1::Message::from_digest(marketplace_sighash.to_byte_array()),
+        &marketplace_keypair,
     );
-    psbt.inputs[0].partial_sigs.insert(
-        marketplace_pubkey,
-        ecdsa::Signature {
-            sig: marketplace_sig,
-            hash_ty: bitcoin::EcdsaSighashType::All,
-        },
-    );
+    let marketplace_tap_sig = taproot::Signature {
+        sig: marketplace_schnorr_sig,
+        hash_ty: bitcoin::sighash::TapSighashType::All,
+    };
+    psbt.inputs[0]
+        .tap_script_sigs
+        .insert((marketplace_xonly, leaf_hash), marketplace_tap_sig);
 
+    // Buyer signs their P2WPKH input with ECDSA
     let buyer_witness_utxo = psbt.inputs[1].witness_utxo.clone().unwrap();
     let buyer_sighash = SighashCache::new(&psbt.unsigned_tx)
         .p2wpkh_signature_hash(
@@ -492,6 +525,8 @@ fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
     .unwrap();
     let tx: Transaction = bitcoin::consensus::deserialize(&hex::decode(raw_tx).unwrap()).unwrap();
 
+    // Taproot script-path witness: [sig2, sig1, script, control_block] = 4 items
     assert_eq!(tx.input[0].witness.len(), 4);
+    // P2WPKH witness: [sig, pubkey] = 2 items
     assert_eq!(tx.input[1].witness.len(), 2);
 }

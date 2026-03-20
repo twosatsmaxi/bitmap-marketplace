@@ -6,7 +6,7 @@
 use anyhow::{anyhow, Result};
 use bitcoin::{
     absolute::LockTime,
-
+    hashes::Hash,
     opcodes::all as op,
     psbt::{Input as PsbtInput, Output as PsbtOutput, Psbt, PsbtSighashType},
     script::{Builder as ScriptBuilder, PushBytesBuf},
