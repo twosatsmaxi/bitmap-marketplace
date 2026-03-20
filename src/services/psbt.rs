@@ -91,6 +91,8 @@ pub struct LockingPsbtRequest {
     pub inscription_input: SpendableInput,
     pub gas_funding_input: Option<SpendableInput>,
     pub seller_pubkey_hex: String,
+    pub seller_address: String,
+    pub price_sats: u64,
     pub marketplace_pubkey_hex: String,
     pub network: Network,
     pub min_relay_fee_rate_sat_vb: Option<f64>,
@@ -688,9 +690,14 @@ pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
 
     // Build sale template for seller pre-signing (SIGHASH_SINGLE|ANYONECANPAY).
     // SegWit v1 txid is stable (non-malleable), so we can compute the planned locked UTXO.
+    let seller_addr = Address::from_str(&req.seller_address)
+        .map_err(|e| anyhow!("invalid seller_address: {}", e))?
+        .assume_checked();
     let sale_template = build_sale_template_psbt(
         &encode_psbt(&psbt),
         &multisig,
+        &seller_addr,
+        req.price_sats,
     )?;
 
     Ok(LockingPsbt {
@@ -710,6 +717,8 @@ pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
 fn build_sale_template_psbt(
     locking_psbt_hex: &str,
     multisig: &TaprootMultisig,
+    seller_address: &Address,
+    price_sats: u64,
 ) -> Result<String> {
     let locking_psbt = decode_psbt(locking_psbt_hex)?;
     let locking_txid = locking_psbt.unsigned_tx.txid();
@@ -730,8 +739,8 @@ fn build_sale_template_psbt(
             witness: Witness::default(),
         }],
         output: vec![TxOut {
-            value: multisig_txout.value,
-            script_pubkey: ScriptBuf::new(), // placeholder; SIGHASH_SINGLE commits to output[0]
+            value: Amount::from_sat(price_sats),
+            script_pubkey: seller_address.script_pubkey(),
         }],
     };
 
@@ -887,7 +896,7 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
         .map_err(|e| anyhow!("protected sale PSBT creation failed: {}", e))?;
 
     // Reconstruct Taproot metadata for the multisig input.
-    let internal_key = resolve_internal_key(&req.buyer_funding_input, &seller_pk);
+    let internal_key = XOnlyPublicKey::from(seller_pk);
     let builder = TaprootBuilder::new()
         .add_leaf(0, leaf_script.clone())
         .map_err(|e| anyhow!("TaprootBuilder::add_leaf failed: {:?}", e))?;

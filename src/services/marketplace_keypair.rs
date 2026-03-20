@@ -69,6 +69,14 @@ impl MarketplaceKeypair {
     pub fn x_only_pubkey_hex(&self) -> String {
         hex::encode(self.x_only_pubkey().serialize())
     }
+
+    #[cfg(test)]
+    pub fn from_secret_key(secret_key: SecretKey) -> Self {
+        Self {
+            secp: Secp256k1::new(),
+            secret_key,
+        }
+    }
 }
 
 impl std::fmt::Debug for MarketplaceKeypair {

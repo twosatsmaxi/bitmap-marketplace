@@ -150,6 +150,8 @@ async fn create_listing(
                 inscription_input: SpendableInput::from(inscription_input),
                 gas_funding_input: req.gas_funding_input.as_ref().map(SpendableInput::from),
                 seller_pubkey_hex: seller_pubkey_hex.clone(),
+                seller_address: req.seller_address.clone(),
+                price_sats: req.price_sats as u64,
                 marketplace_pubkey_hex: state.marketplace_keypair.pubkey_hex(),
                 network: state.network,
                 min_relay_fee_rate_sat_vb: None,

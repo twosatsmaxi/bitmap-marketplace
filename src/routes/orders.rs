@@ -115,21 +115,6 @@ async fn buy(
 
     let result = build_buy_psbt(&buy_req).map_err(|e| AppError::Internal(e))?;
 
-    // Insert Activity
-    let activity = Activity {
-        id: Uuid::new_v4(),
-        inscription_id: listing.inscription_id.clone(),
-        collection_id: None,
-        activity_type: ActivityType::Sale,
-        from_address: Some(listing.seller_address.clone()),
-        to_address: Some(req.buyer_address.clone()),
-        price_sats: Some(listing.price_sats),
-        tx_id: None,
-        block_height: None,
-        created_at: chrono::Utc::now(),
-    };
-    let _ = state.db.create_activity(&activity).await;
-
     Ok(Json(serde_json::json!({
         "psbt": result.psbt_hex,
         "estimated_fee_sats": result.estimated_fee_sats,
@@ -309,6 +294,21 @@ async fn confirm_order(
     .map_err(AppError::Database)?;
 
     tx.commit().await.map_err(AppError::Database)?;
+
+    // Record activity at confirmation time (not at PSBT build time).
+    let activity = Activity {
+        id: Uuid::new_v4(),
+        inscription_id: listing.inscription_id.clone(),
+        collection_id: None,
+        activity_type: ActivityType::Sale,
+        from_address: Some(listing.seller_address.clone()),
+        to_address: Some(buyer_address.clone()),
+        price_sats: Some(listing.price_sats),
+        tx_id: Some(tx_id.clone()),
+        block_height: None,
+        created_at: chrono::Utc::now(),
+    };
+    let _ = state.db.create_activity(&activity).await;
 
     state.ws_broadcaster.send(WsEvent::SaleConfirmed {
         inscription_id: listing.inscription_id.clone(),
