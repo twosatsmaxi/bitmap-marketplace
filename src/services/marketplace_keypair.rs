@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use bitcoin::secp256k1::ecdsa::Signature;
-use bitcoin::secp256k1::{All, Message, Secp256k1, SecretKey};
+use bitcoin::secp256k1::{All, Keypair, Message, Secp256k1, SecretKey};
 use std::sync::Arc;
 
 pub struct MarketplaceKeypair {
@@ -44,6 +44,30 @@ impl MarketplaceKeypair {
         let msg = Message::from_digest(*sighash);
         let sig = self.secp.sign_ecdsa(&msg, &self.secret_key);
         Ok(sig)
+    }
+
+    /// Signs a 32-byte sighash using Schnorr (BIP 340) for Taproot script-path spending.
+    pub fn sign_schnorr(&self, sighash: &[u8; 32]) -> Result<bitcoin::secp256k1::schnorr::Signature> {
+        let msg = Message::from_digest(*sighash);
+        let keypair = Keypair::from_secret_key(&self.secp, &self.secret_key);
+        let sig = self.secp.sign_schnorr(&msg, &keypair);
+        Ok(sig)
+    }
+
+    /// Returns the secp256k1 Keypair (needed for Schnorr signing contexts).
+    pub fn keypair(&self) -> Keypair {
+        Keypair::from_secret_key(&self.secp, &self.secret_key)
+    }
+
+    /// Returns the x-only public key (32 bytes) for Taproot contexts.
+    pub fn x_only_pubkey(&self) -> bitcoin::secp256k1::XOnlyPublicKey {
+        let keypair = Keypair::from_secret_key(&self.secp, &self.secret_key);
+        bitcoin::secp256k1::XOnlyPublicKey::from_keypair(&keypair).0
+    }
+
+    /// Returns the x-only public key as a 64-char hex string.
+    pub fn x_only_pubkey_hex(&self) -> String {
+        hex::encode(self.x_only_pubkey().serialize())
     }
 }
 
