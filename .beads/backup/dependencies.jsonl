@@ -29,3 +29,7 @@
 {"created_at":"2026-03-15T05:37:38Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-e8u","issue_id":"bitmap-marketplace-mrv","type":"blocks"}
 {"created_at":"2026-03-15T04:16:09Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-e0t","issue_id":"bitmap-marketplace-o1a","type":"blocks"}
 {"created_at":"2026-03-15T05:37:38Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-e1e","issue_id":"bitmap-marketplace-ydg","type":"blocks"}
+{"created_at":"2026-03-20T13:55:01Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-zl6","issue_id":"bitmap-marketplace-zl6.1","type":"parent-child"}
+{"created_at":"2026-03-20T13:55:04Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-zl6","issue_id":"bitmap-marketplace-zl6.2","type":"parent-child"}
+{"created_at":"2026-03-20T13:55:08Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-zl6","issue_id":"bitmap-marketplace-zl6.3","type":"parent-child"}
+{"created_at":"2026-03-20T13:55:12Z","created_by":"twosatsmaxi","depends_on_id":"bitmap-marketplace-zl6","issue_id":"bitmap-marketplace-zl6.4","type":"parent-child"}
