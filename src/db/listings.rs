@@ -99,9 +99,8 @@ impl Database {
         let result = sqlx::query_as::<_, Listing>(
             r#"
             INSERT INTO listings (id, inscription_id, seller_address, price_sats, status, psbt,
-                royalty_address, royalty_bps,
                 seller_pubkey, multisig_address, multisig_script, protection_status, source_marketplace)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *
             "#
         )
@@ -111,8 +110,6 @@ impl Database {
         .bind(listing.price_sats)
         .bind(&listing.status)
         .bind(&listing.psbt)
-        .bind(&listing.royalty_address)
-        .bind(listing.royalty_bps)
         .bind(&listing.seller_pubkey)
         .bind(&listing.multisig_address)
         .bind(&listing.multisig_script)
@@ -127,12 +124,14 @@ impl Database {
         &self,
         id: uuid::Uuid,
         locking_raw_tx: &str,
+        seller_sale_sig: Option<&str>,
         protection_status: &str,
     ) -> Result<()> {
         sqlx::query(
-            "UPDATE listings SET locking_raw_tx = $1, protection_status = $2, updated_at = NOW() WHERE id = $3"
+            "UPDATE listings SET locking_raw_tx = $1, seller_sale_sig = $2, protection_status = $3, updated_at = NOW() WHERE id = $4"
         )
         .bind(locking_raw_tx)
+        .bind(seller_sale_sig)
         .bind(protection_status)
         .bind(id)
         .execute(&self.pool)

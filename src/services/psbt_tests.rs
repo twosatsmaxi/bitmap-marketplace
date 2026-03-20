@@ -177,6 +177,8 @@ fn buy_psbt_populates_real_buyer_prevout_metadata() {
         buyer_address: BUYER_ADDR.to_string(),
         buyer_funding_input: buyer_input.clone(),
         fee_rate_sat_vb: 10.0,
+        marketplace_fee_address: None,
+        marketplace_fee_bps: 0,
     })
     .unwrap();
     let psbt = decode_psbt(&result.psbt_hex).unwrap();
@@ -204,6 +206,8 @@ fn buy_psbt_rejects_wrapped_segwit_without_redeem_script() {
         buyer_address: BUYER_ADDR.to_string(),
         buyer_funding_input: buyer_input,
         fee_rate_sat_vb: 10.0,
+        marketplace_fee_address: None,
+        marketplace_fee_bps: 0,
     })
     .unwrap_err();
 
@@ -310,10 +314,14 @@ fn protected_sale_psbt_populates_multisig_and_buyer_metadata() {
         multisig_vout: 0,
         multisig_script_hex: hex::encode(witness_script.as_bytes()),
         seller_address: SELLER_ADDR.to_string(),
+        seller_pubkey_hex: seller_pubkey.to_string(),
         price_sats: 50_000,
         buyer_address: BUYER_ADDR.to_string(),
         buyer_funding_input: buyer_input.clone(),
         fee_rate_sat_vb: 5.0,
+        marketplace_fee_address: None,
+        marketplace_fee_bps: 0,
+        seller_sale_sig_hex: None,
     })
     .unwrap();
     let psbt = decode_psbt(&result.psbt_hex).unwrap();
@@ -407,10 +415,14 @@ fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
             multisig_vout: 0,
             multisig_script_hex: hex::encode(witness_script.as_bytes()),
             seller_address: SELLER_ADDR.to_string(),
+            seller_pubkey_hex: seller_pubkey.to_string(),
             price_sats: 50_000,
             buyer_address: BUYER_ADDR.to_string(),
             buyer_funding_input: buyer_input,
             fee_rate_sat_vb: 5.0,
+            marketplace_fee_address: None,
+            marketplace_fee_bps: 0,
+            seller_sale_sig_hex: None,
         })
         .unwrap()
         .psbt_hex,

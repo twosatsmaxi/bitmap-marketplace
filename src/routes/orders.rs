@@ -5,8 +5,8 @@ use crate::{
     models::sale::Sale,
     services::psbt::{
         apply_marketplace_signature, build_buy_psbt, build_protected_sale_psbt,
-        finalize_and_extract, finalize_multisig_and_extract, BuyRequest, ProtectedSalePsbtRequest,
-        SpendableInput, WitnessUtxo,
+        calculate_marketplace_fee, finalize_and_extract, finalize_multisig_and_extract, BuyRequest,
+        ProtectedSalePsbtRequest, SpendableInput, WitnessUtxo,
     },
     ws::WsEvent,
     AppState,
@@ -76,20 +76,33 @@ async fn buy(
                 "listing is active but missing multisig_script"
             ))
         })?;
+        let seller_pubkey = listing.seller_pubkey.ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!("listing is active but missing seller_pubkey"))
+        })?;
 
         let buyer_funding_input = req.buyer_funding_input.as_ref().ok_or_else(|| {
             AppError::BadRequest("buyer_funding_input required for protected purchase".to_string())
         })?;
+
+        let marketplace_fee_address = std::env::var("MARKETPLACE_FEE_ADDRESS").ok();
+        let marketplace_fee_bps: u64 = std::env::var("MARKETPLACE_FEE_BPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
 
         let psbt_req = ProtectedSalePsbtRequest {
             locking_raw_tx_hex: locking_raw_tx,
             multisig_vout: 0,
             multisig_script_hex: multisig_script,
             seller_address: listing.seller_address.clone(),
+            seller_pubkey_hex: seller_pubkey,
             price_sats: listing.price_sats as u64,
             buyer_address: req.buyer_address.clone(),
             buyer_funding_input: map_spendable_input(buyer_funding_input),
             fee_rate_sat_vb: req.fee_rate_sat_vb.unwrap_or(5.0),
+            marketplace_fee_address,
+            marketplace_fee_bps,
+            seller_sale_sig_hex: listing.seller_sale_sig,
         };
 
         let result = build_protected_sale_psbt(&psbt_req).map_err(|e| AppError::Internal(e))?;
@@ -97,6 +110,7 @@ async fn buy(
         return Ok(Json(serde_json::json!({
             "psbt": result.psbt_hex,
             "estimated_fee_sats": result.estimated_fee_sats,
+            "marketplace_fee_sats": result.marketplace_fee_sats,
             "locking_txid": result.locking_txid,
             "protection_status": "active",
         })));
@@ -107,6 +121,12 @@ async fn buy(
         .psbt
         .ok_or_else(|| AppError::BadRequest("listing has no PSBT".to_string()))?;
 
+    let marketplace_fee_address = std::env::var("MARKETPLACE_FEE_ADDRESS").ok();
+    let marketplace_fee_bps: u64 = std::env::var("MARKETPLACE_FEE_BPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
     let buy_req = BuyRequest {
         seller_psbt_hex,
         buyer_address: req.buyer_address.clone(),
@@ -116,6 +136,8 @@ async fn buy(
                 .ok_or_else(|| AppError::BadRequest("buyer_funding_input required".to_string()))?,
         ),
         fee_rate_sat_vb: req.fee_rate_sat_vb.unwrap_or(5.0),
+        marketplace_fee_address,
+        marketplace_fee_bps,
     };
 
     let result = build_buy_psbt(&buy_req).map_err(|e| AppError::Internal(e))?;
@@ -138,6 +160,7 @@ async fn buy(
     Ok(Json(serde_json::json!({
         "psbt": result.psbt_hex,
         "estimated_fee_sats": result.estimated_fee_sats,
+        "marketplace_fee_sats": result.marketplace_fee_sats,
         "protection_status": "none",
     })))
 }
@@ -170,6 +193,13 @@ async fn confirm_order(
 
     let buyer_address = req.buyer_address.unwrap_or_else(|| "unknown".to_string());
 
+    let marketplace_fee_bps: u64 = std::env::var("MARKETPLACE_FEE_BPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let marketplace_fee_sats =
+        calculate_marketplace_fee(listing.price_sats as u64, marketplace_fee_bps) as i64;
+
     if listing.protection_status == "active" {
         // Protected flow.
         let locking_raw_tx = listing
@@ -191,6 +221,22 @@ async fn confirm_order(
             &state.marketplace_keypair.pubkey_hex(),
         )
         .map_err(|e| AppError::Internal(e))?;
+
+        // Pre-broadcast UTXO liveness check: verify locking tx inputs are still unspent.
+        let locking_tx = bitcoin::consensus::deserialize::<bitcoin::Transaction>(
+            &hex::decode(&locking_raw_tx).map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?,
+        )
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+        for input in &locking_tx.input {
+            let txid = input.previous_output.txid.to_string();
+            let vout = input.previous_output.vout;
+            if rpc.get_utxo_info(&txid, vout).map_err(AppError::Internal)?.is_none() {
+                return Err(AppError::Conflict(format!(
+                    "locking tx input {}:{} is already spent; seller may have moved the inscription",
+                    txid, vout
+                )));
+            }
+        }
 
         // Package broadcast: [locking_tx, sale_tx].
         let txids = rpc
@@ -224,7 +270,7 @@ async fn confirm_order(
             seller_address: listing.seller_address.clone(),
             buyer_address: buyer_address.clone(),
             price_sats: listing.price_sats,
-            royalty_sats: 0,
+            marketplace_fee_sats,
             tx_id: Some(sale_txid.clone()),
             locking_tx_id: Some(locking_txid.clone()),
             block_height: None,
@@ -232,7 +278,7 @@ async fn confirm_order(
             created_at: chrono::Utc::now(),
         };
         sqlx::query(
-            r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, royalty_sats, tx_id, locking_tx_id, block_height, confirmed_at)
+            r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, marketplace_fee_sats, tx_id, locking_tx_id, block_height, confirmed_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
         )
         .bind(sale.id)
@@ -241,7 +287,7 @@ async fn confirm_order(
         .bind(&sale.seller_address)
         .bind(&sale.buyer_address)
         .bind(sale.price_sats)
-        .bind(sale.royalty_sats)
+        .bind(sale.marketplace_fee_sats)
         .bind(&sale.tx_id)
         .bind(&sale.locking_tx_id)
         .bind(sale.block_height)
@@ -300,7 +346,7 @@ async fn confirm_order(
         seller_address: listing.seller_address.clone(),
         buyer_address: buyer_address.clone(),
         price_sats: listing.price_sats,
-        royalty_sats: 0,
+        marketplace_fee_sats,
         tx_id: Some(tx_id.clone()),
         locking_tx_id: None,
         block_height: None,
@@ -308,7 +354,7 @@ async fn confirm_order(
         created_at: chrono::Utc::now(),
     };
     sqlx::query(
-        r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, royalty_sats, tx_id, locking_tx_id, block_height, confirmed_at)
+        r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, marketplace_fee_sats, tx_id, locking_tx_id, block_height, confirmed_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
     )
     .bind(sale.id)
@@ -317,7 +363,7 @@ async fn confirm_order(
     .bind(&sale.seller_address)
     .bind(&sale.buyer_address)
     .bind(sale.price_sats)
-    .bind(sale.royalty_sats)
+    .bind(sale.marketplace_fee_sats)
     .bind(&sale.tx_id)
     .bind(&sale.locking_tx_id)
     .bind(sale.block_height)

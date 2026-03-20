@@ -54,12 +54,15 @@ pub struct BuyRequest {
     pub buyer_address: String,
     pub buyer_funding_input: SpendableInput,
     pub fee_rate_sat_vb: f64,
+    pub marketplace_fee_address: Option<String>,
+    pub marketplace_fee_bps: u64,
 }
 
 #[derive(Debug)]
 pub struct BuyPsbt {
     pub psbt_hex: String,
     pub estimated_fee_sats: u64,
+    pub marketplace_fee_sats: u64,
 }
 
 pub struct LockingPsbtRequest {
@@ -76,6 +79,13 @@ pub struct LockingPsbt {
     pub psbt_hex: String,
     pub multisig_address: String,
     pub multisig_script_hex: String,
+    /// Sale template PSBT for the seller to pre-sign with SIGHASH_SINGLE|ANYONECANPAY.
+    pub sale_template_psbt_hex: String,
+}
+
+struct SaleTemplateRequest {
+    locking_psbt_hex: String,
+    multisig_script_hex: String,
 }
 
 pub struct ProtectedSalePsbtRequest {
@@ -83,10 +93,15 @@ pub struct ProtectedSalePsbtRequest {
     pub multisig_vout: u32,
     pub multisig_script_hex: String,
     pub seller_address: String,
+    pub seller_pubkey_hex: String,
     pub price_sats: u64,
     pub buyer_address: String,
     pub buyer_funding_input: SpendableInput,
     pub fee_rate_sat_vb: f64,
+    pub marketplace_fee_address: Option<String>,
+    pub marketplace_fee_bps: u64,
+    /// Seller's pre-signed partial_sig (hex) for the multisig input, signed at listing time.
+    pub seller_sale_sig_hex: Option<String>,
 }
 
 #[derive(Debug)]
@@ -94,6 +109,7 @@ pub struct ProtectedSalePsbt {
     pub psbt_hex: String,
     pub estimated_fee_sats: u64,
     pub locking_txid: String,
+    pub marketplace_fee_sats: u64,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -111,11 +127,10 @@ const SALE_TX_OVERHEAD_VBYTES: f64 = 10.5;
 const MULTISIG_INPUT_VBYTES: f64 = 140.0;
 const INSCRIPTION_DUST_SATS: u64 = 546;
 const LOCKING_OUTPUT_DUST_SATS: u64 = 330;
+const MIN_MARKETPLACE_FEE_SATS: u64 = 1000;
 
 /// Minimum inscription value (sats) that is self-funding for locking tx.
 pub const MIN_SELF_FUNDED: u64 = 343;
-/// Flat locking fee kept compatible with the existing marketplace workflow.
-pub const DEFAULT_LOCKING_TX_FEE_SATS: u64 = 13;
 
 pub fn build_listing_psbt(req: &ListingRequest) -> Result<ListingPsbt> {
     let txid = Txid::from_str(&req.inscription_txid)
@@ -183,12 +198,21 @@ fn locking_input_vbytes(input_type: SupportedInputType) -> f64 {
     }
 }
 
-fn sale_tx_vbytes(buyer_input_type: SupportedInputType) -> u64 {
+fn sale_tx_vbytes(buyer_input_type: SupportedInputType, output_count: u64) -> u64 {
     (SALE_TX_OVERHEAD_VBYTES
         + MULTISIG_INPUT_VBYTES
         + locking_input_vbytes(buyer_input_type)
-        + (SALE_TX_OUTPUT_VBYTES * 3.0))
+        + (SALE_TX_OUTPUT_VBYTES * output_count as f64))
         .ceil() as u64
+}
+
+/// Calculate marketplace fee: max(price * bps / 10000, MIN_MARKETPLACE_FEE_SATS).
+pub fn calculate_marketplace_fee(price_sats: u64, fee_bps: u64) -> u64 {
+    if fee_bps == 0 {
+        return 0;
+    }
+    let bps_fee = price_sats * fee_bps / 10_000;
+    bps_fee.max(MIN_MARKETPLACE_FEE_SATS)
 }
 
 fn estimate_locking_tx_vbytes(input_types: &[SupportedInputType]) -> u64 {
@@ -371,23 +395,34 @@ pub fn build_buy_psbt(req: &BuyRequest) -> Result<BuyPsbt> {
     let buyer_input_type =
         detect_supported_input_type(&req.buyer_funding_input, "buyer_funding_input")?;
 
-    let estimated_fee_sats = (sale_tx_vbytes(buyer_input_type) as f64 * req.fee_rate_sat_vb) as u64;
-    let total_required = price_sats + INSCRIPTION_DUST_SATS + estimated_fee_sats;
+    let marketplace_fee_sats = calculate_marketplace_fee(price_sats, req.marketplace_fee_bps);
+    let fee_addr = req
+        .marketplace_fee_address
+        .as_ref()
+        .filter(|_| marketplace_fee_sats > 0);
+    let output_count: u64 = if fee_addr.is_some() { 4 } else { 3 };
+
+    let estimated_fee_sats =
+        (sale_tx_vbytes(buyer_input_type, output_count) as f64 * req.fee_rate_sat_vb) as u64;
+    let total_required =
+        price_sats + INSCRIPTION_DUST_SATS + estimated_fee_sats + marketplace_fee_sats;
     if req.buyer_funding_input.value_sats < total_required {
         return Err(anyhow!(
-            "buyer input amount ({} sats) is insufficient; need at least {} sats (price {} + dust {} + fee {})",
+            "buyer input amount ({} sats) is insufficient; need at least {} sats (price {} + dust {} + tx_fee {} + marketplace_fee {})",
             req.buyer_funding_input.value_sats,
             total_required,
             price_sats,
             INSCRIPTION_DUST_SATS,
-            estimated_fee_sats
+            estimated_fee_sats,
+            marketplace_fee_sats
         ));
     }
 
     let change_sats = req.buyer_funding_input.value_sats
         - price_sats
         - INSCRIPTION_DUST_SATS
-        - estimated_fee_sats;
+        - estimated_fee_sats
+        - marketplace_fee_sats;
     let buyer_txid = Txid::from_str(&req.buyer_funding_input.txid)
         .map_err(|e| anyhow!("invalid buyer input txid: {}", e))?;
     let buyer_tx_in = TxIn {
@@ -408,6 +443,16 @@ pub fn build_buy_psbt(req: &BuyRequest) -> Result<BuyPsbt> {
         script_pubkey: buyer_script,
     });
 
+    if let Some(addr_str) = fee_addr {
+        let fee_address = Address::from_str(addr_str)
+            .map_err(|e| anyhow!("invalid marketplace_fee_address: {}", e))?
+            .assume_checked();
+        tx.output.push(TxOut {
+            value: Amount::from_sat(marketplace_fee_sats),
+            script_pubkey: fee_address.script_pubkey(),
+        });
+    }
+
     let seller_input_meta = psbt.inputs[0].clone();
     let seller_output_meta = psbt.outputs[0].clone();
 
@@ -421,6 +466,7 @@ pub fn build_buy_psbt(req: &BuyRequest) -> Result<BuyPsbt> {
     Ok(BuyPsbt {
         psbt_hex: encode_psbt(&new_psbt),
         estimated_fee_sats,
+        marketplace_fee_sats,
     })
 }
 
@@ -507,13 +553,15 @@ pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
         }
     }
 
+    let locking_fee_sats =
+        (estimate_locking_tx_vbytes(&input_types) as f64 * min_relay_fee_rate).ceil() as u64;
     let locked_value_sats = req.inscription_input.value_sats
         + req
             .gas_funding_input
             .as_ref()
             .map(|input| input.value_sats)
             .unwrap_or(0)
-        - DEFAULT_LOCKING_TX_FEE_SATS;
+        - locking_fee_sats;
 
     if locked_value_sats < LOCKING_OUTPUT_DUST_SATS {
         return Err(anyhow!(
@@ -560,11 +608,86 @@ pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
         add_spendable_input(&mut psbt, 1, gas_input)?;
     }
 
+    let multisig_script_hex = hex::encode(witness_script.as_bytes());
+
+    // Build sale template for seller pre-signing (SIGHASH_SINGLE|ANYONECANPAY).
+    // SegWit txid is stable (non-malleable), so we can compute the planned locked UTXO.
+    let sale_template = build_sale_template_psbt(&SaleTemplateRequest {
+        locking_psbt_hex: encode_psbt(&psbt),
+        multisig_script_hex: multisig_script_hex.clone(),
+    })?;
+
     Ok(LockingPsbt {
         psbt_hex: encode_psbt(&psbt),
         multisig_address: multisig_address.to_string(),
-        multisig_script_hex: hex::encode(witness_script.as_bytes()),
+        multisig_script_hex,
+        sale_template_psbt_hex: sale_template,
     })
+}
+
+/// Build a minimal sale template PSBT for the seller to pre-sign.
+/// Contains 1 input (the planned multisig UTXO) and 1 output (seller payment placeholder).
+/// The seller signs with SIGHASH_SINGLE|ANYONECANPAY so the signature remains valid
+/// when additional inputs/outputs are added at buy time.
+fn build_sale_template_psbt(req: &SaleTemplateRequest) -> Result<String> {
+    let locking_psbt = decode_psbt(&req.locking_psbt_hex)?;
+    let locking_txid = locking_psbt.unsigned_tx.txid();
+    let multisig_txout = locking_psbt
+        .unsigned_tx
+        .output
+        .first()
+        .ok_or_else(|| anyhow!("locking PSBT has no outputs"))?
+        .clone();
+
+    let witness_script = parse_script_hex("multisig_script_hex", &req.multisig_script_hex)?;
+
+    // Minimal 1-in/1-out template. Output 0 is the seller payment (value doesn't matter for
+    // SIGHASH_SINGLE — only its script_pubkey and index are committed). We use the locked value
+    // as a placeholder since the actual price will appear at the same index in the final tx.
+    let unsigned_tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::new(locking_txid, 0),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::default(),
+        }],
+        output: vec![TxOut {
+            value: multisig_txout.value,
+            script_pubkey: ScriptBuf::new(), // placeholder; SIGHASH_SINGLE commits to output[0]
+        }],
+    };
+
+    let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)
+        .map_err(|e| anyhow!("sale template PSBT creation failed: {}", e))?;
+    psbt.inputs[0].sighash_type = Some(PsbtSighashType::from(
+        bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
+    ));
+    psbt.inputs[0].witness_utxo = Some(multisig_txout);
+    psbt.inputs[0].witness_script = Some(witness_script);
+
+    Ok(encode_psbt(&psbt))
+}
+
+/// Extract the seller's partial signature from a signed sale template PSBT.
+/// The seller signs the template with SIGHASH_SINGLE|ANYONECANPAY; this extracts
+/// the resulting partial_sig for embedding into the full sale PSBT at buy time.
+pub fn extract_seller_sale_sig(
+    signed_sale_template_hex: &str,
+    seller_pubkey_hex: &str,
+) -> Result<String> {
+    let psbt = decode_psbt(signed_sale_template_hex)?;
+    let seller_pk = bitcoin::PublicKey::from_str(seller_pubkey_hex)
+        .map_err(|e| anyhow!("invalid seller_pubkey_hex: {}", e))?;
+
+    let sig = psbt.inputs[0]
+        .partial_sigs
+        .get(&seller_pk)
+        .ok_or_else(|| anyhow!("seller signature missing from sale template PSBT input 0"))?;
+
+    // Serialize: DER-encoded sig + sighash byte
+    Ok(hex::encode(sig.to_vec()))
 }
 
 pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<ProtectedSalePsbt> {
@@ -586,26 +709,62 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
     let buyer_input_type =
         detect_supported_input_type(&req.buyer_funding_input, "buyer_funding_input")?;
 
-    let estimated_fee_sats = (sale_tx_vbytes(buyer_input_type) as f64 * req.fee_rate_sat_vb) as u64;
-    let total_required = req.price_sats + INSCRIPTION_DUST_SATS + estimated_fee_sats;
+    let marketplace_fee_sats = calculate_marketplace_fee(req.price_sats, req.marketplace_fee_bps);
+    let fee_addr = req
+        .marketplace_fee_address
+        .as_ref()
+        .filter(|_| marketplace_fee_sats > 0);
+    let output_count: u64 = if fee_addr.is_some() { 4 } else { 3 };
+
+    let estimated_fee_sats =
+        (sale_tx_vbytes(buyer_input_type, output_count) as f64 * req.fee_rate_sat_vb) as u64;
+    let total_required =
+        req.price_sats + INSCRIPTION_DUST_SATS + estimated_fee_sats + marketplace_fee_sats;
     if req.buyer_funding_input.value_sats < total_required {
         return Err(anyhow!(
-            "buyer input ({} sats) insufficient; need {} sats (price {} + dust {} + fee {})",
+            "buyer input ({} sats) insufficient; need {} sats (price {} + dust {} + tx_fee {} + marketplace_fee {})",
             req.buyer_funding_input.value_sats,
             total_required,
             req.price_sats,
             INSCRIPTION_DUST_SATS,
-            estimated_fee_sats
+            estimated_fee_sats,
+            marketplace_fee_sats
         ));
     }
 
     let change_sats = req.buyer_funding_input.value_sats
         - req.price_sats
         - INSCRIPTION_DUST_SATS
-        - estimated_fee_sats;
+        - estimated_fee_sats
+        - marketplace_fee_sats;
 
     let buyer_txid = Txid::from_str(&req.buyer_funding_input.txid)
         .map_err(|e| anyhow!("invalid buyer_funding_input.txid: {}", e))?;
+
+    let mut outputs = vec![
+        TxOut {
+            value: Amount::from_sat(req.price_sats),
+            script_pubkey: seller_addr.script_pubkey(),
+        },
+        TxOut {
+            value: Amount::from_sat(INSCRIPTION_DUST_SATS),
+            script_pubkey: buyer_addr.script_pubkey(),
+        },
+        TxOut {
+            value: Amount::from_sat(change_sats),
+            script_pubkey: buyer_addr.script_pubkey(),
+        },
+    ];
+
+    if let Some(addr_str) = fee_addr {
+        let fee_address = Address::from_str(addr_str)
+            .map_err(|e| anyhow!("invalid marketplace_fee_address: {}", e))?
+            .assume_checked();
+        outputs.push(TxOut {
+            value: Amount::from_sat(marketplace_fee_sats),
+            script_pubkey: fee_address.script_pubkey(),
+        });
+    }
 
     let unsigned_tx = Transaction {
         version: bitcoin::transaction::Version::TWO,
@@ -624,20 +783,7 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
                 witness: Witness::default(),
             },
         ],
-        output: vec![
-            TxOut {
-                value: Amount::from_sat(req.price_sats),
-                script_pubkey: seller_addr.script_pubkey(),
-            },
-            TxOut {
-                value: Amount::from_sat(INSCRIPTION_DUST_SATS),
-                script_pubkey: buyer_addr.script_pubkey(),
-            },
-            TxOut {
-                value: Amount::from_sat(change_sats),
-                script_pubkey: buyer_addr.script_pubkey(),
-            },
-        ],
+        output: outputs,
     };
 
     let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)
@@ -649,10 +795,22 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
     psbt.inputs[0].witness_script = Some(witness_script);
     add_spendable_input(&mut psbt, 1, &req.buyer_funding_input)?;
 
+    // Embed the seller's pre-signed partial_sig (produced at listing time).
+    if let Some(ref sig_hex) = req.seller_sale_sig_hex {
+        let sig_bytes = hex::decode(sig_hex)
+            .map_err(|e| anyhow!("invalid seller_sale_sig_hex: {}", e))?;
+        let seller_pk = bitcoin::PublicKey::from_str(&req.seller_pubkey_hex)
+            .map_err(|e| anyhow!("invalid seller_pubkey_hex: {}", e))?;
+        let ecdsa_sig = ecdsa::Signature::from_slice(&sig_bytes)
+            .map_err(|e| anyhow!("invalid seller ECDSA signature: {}", e))?;
+        psbt.inputs[0].partial_sigs.insert(seller_pk, ecdsa_sig);
+    }
+
     Ok(ProtectedSalePsbt {
         psbt_hex: encode_psbt(&psbt),
         estimated_fee_sats,
         locking_txid: locking_txid.to_string(),
+        marketplace_fee_sats,
     })
 }
 
