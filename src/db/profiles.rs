@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub struct Profile {
     pub id: Uuid,
     pub primary_address: String,
+    pub token_version: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -122,6 +123,17 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
         Ok(addresses)
+    }
+
+    /// Increment token_version (used for JWT revocation)
+    pub async fn increment_token_version(&self, profile_id: Uuid) -> Result<i32> {
+        let row = sqlx::query_scalar::<_, i32>(
+            "UPDATE profiles SET token_version = token_version + 1 WHERE id = $1 RETURNING token_version"
+        )
+        .bind(profile_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
     }
 
     /// Count wallets for a profile

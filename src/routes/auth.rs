@@ -3,7 +3,8 @@ use std::sync::LazyLock;
 
 use axum::{
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{header::SET_COOKIE, HeaderMap},
+    response::IntoResponse,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -101,11 +102,38 @@ struct WalletResponse {
 // ---------------------------------------------------------------------------
 
 fn extract_token(headers: &HeaderMap) -> Option<String> {
-    headers
+    // Try Authorization header first
+    if let Some(token) = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_string())
+    {
+        return Some(token);
+    }
+    // Fallback: read from cookie
+    headers
+        .get("Cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';')
+                .find_map(|c| {
+                    let c = c.trim();
+                    c.strip_prefix("bitmap_token=").map(|t| t.to_string())
+                })
+        })
+}
+
+fn auth_response_with_cookie(auth_resp: AuthResponse, token: &str) -> impl IntoResponse {
+    let cookie = format!(
+        "bitmap_token={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}",
+        token,
+        30 * 24 * 60 * 60 // 30 days
+    );
+    (
+        [(SET_COOKIE, cookie)],
+        Json(auth_resp),
+    )
 }
 
 fn build_profile_response(profile: &Profile, wallets: &[ProfileWallet]) -> ProfileResponse {
@@ -180,7 +208,7 @@ async fn connect_wallet(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<ConnectRequest>,
-) -> Result<Json<AuthResponse>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     // 1. Verify the challenge exists and hasn't expired
     {
         let mut challenges = CHALLENGES.write().await;
@@ -217,13 +245,14 @@ async fn connect_wallet(
     // 3. Check if a profile already exists for this ordinals address.
     if let Some(profile) = db.get_profile_by_address(&body.ordinals_address).await? {
         let wallets = db.get_profile_wallets(profile.id).await?;
-        let token = jwt::create_token(profile.id, &profile.primary_address, &state.jwt_secret)
+        let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, &state.jwt_secret)
             .map_err(|e| AppError::Internal(e))?;
 
-        return Ok(Json(AuthResponse {
-            token,
+        let response = AuthResponse {
+            token: token.clone(),
             profile: build_profile_response(&profile, &wallets),
-        }));
+        };
+        return Ok(auth_response_with_cookie(response, &token));
     }
 
     // 4. No existing profile for this address — check for a JWT to link to an
@@ -248,13 +277,14 @@ async fn connect_wallet(
 
             let wallets = db.get_profile_wallets(profile.id).await?;
             let token =
-                jwt::create_token(profile.id, &profile.primary_address, &state.jwt_secret)
+                jwt::create_token(profile.id, &profile.primary_address, profile.token_version, &state.jwt_secret)
                     .map_err(|e| AppError::Internal(e))?;
 
-            return Ok(Json(AuthResponse {
-                token,
+            let response = AuthResponse {
+                token: token.clone(),
                 profile: build_profile_response(&profile, &wallets),
-            }));
+            };
+            return Ok(auth_response_with_cookie(response, &token));
         }
     }
 
@@ -270,13 +300,14 @@ async fn connect_wallet(
     .await?;
 
     let wallets = db.get_profile_wallets(profile.id).await?;
-    let token = jwt::create_token(profile.id, &profile.primary_address, &state.jwt_secret)
+    let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, &state.jwt_secret)
         .map_err(|e| AppError::Internal(e))?;
 
-    Ok(Json(AuthResponse {
-        token,
+    let response = AuthResponse {
+        token: token.clone(),
         profile: build_profile_response(&profile, &wallets),
-    }))
+    };
+    Ok(auth_response_with_cookie(response, &token))
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +330,10 @@ async fn get_profile(
         .await?
         .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
 
+    if profile.token_version != claims.token_version {
+        return Err(AppError::Unauthorized("Token has been revoked".into()));
+    }
+
     let wallets = state.db.get_profile_wallets(profile.id).await?;
 
     Ok(Json(build_profile_response(&profile, &wallets)))
@@ -318,6 +353,16 @@ async fn remove_wallet(
 
     let claims = jwt::verify_token(&token_str, &state.jwt_secret)
         .map_err(|_| AppError::Unauthorized("Invalid or expired token".to_string()))?;
+
+    let profile = state
+        .db
+        .get_profile_by_id(claims.profile_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
+
+    if profile.token_version != claims.token_version {
+        return Err(AppError::Unauthorized("Token has been revoked".into()));
+    }
 
     let wallet_count = state.db.count_profile_wallets(claims.profile_id).await?;
     if wallet_count <= 1 {

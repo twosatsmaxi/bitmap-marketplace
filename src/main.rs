@@ -140,6 +140,24 @@ async fn main() -> Result<()> {
             .unwrap(),
     );
 
+    // Stricter rate limit for auth endpoints: 3 req/s, 10 burst
+    let auth_governor_conf = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(3)
+            .burst_size(10)
+            .finish()
+            .unwrap(),
+    );
+
+    // /api/auth subrouter — stricter rate limiting to prevent brute-force attacks
+    let auth_api_router = routes::auth_router()
+        .layer(GovernorLayer {
+            config: Arc::clone(&auth_governor_conf),
+        })
+        .layer(ConcurrencyLimitLayer::new(100))
+        .layer(RequestBodyLimitLayer::new(512 * 1024))
+        .layer(TimeoutLayer::new(Duration::from_secs(30)));
+
     // /api subrouter — full hardening stack
     // Bitcoin RPC calls can take up to 10s, so we use 30s timeout to be safe.
     let api_router = routes::router()
@@ -155,6 +173,7 @@ async fn main() -> Result<()> {
     let ws_router = ws::router(ws_broadcaster);
 
     let app = Router::new()
+        .nest("/api/auth", auth_api_router)
         .nest("/api", api_router)
         .merge(ws_router)
         .layer(CompressionLayer::new())

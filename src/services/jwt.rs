@@ -7,10 +7,11 @@ use uuid::Uuid;
 pub struct Claims {
     pub profile_id: Uuid,
     pub primary_address: String,
+    pub token_version: i32,
     pub exp: usize,
 }
 
-pub fn create_token(profile_id: Uuid, primary_address: &str, secret: &str) -> Result<String> {
+pub fn create_token(profile_id: Uuid, primary_address: &str, token_version: i32, secret: &str) -> Result<String> {
     // 30 day expiry
     let exp = chrono::Utc::now()
         .checked_add_signed(chrono::Duration::days(30))
@@ -20,6 +21,7 @@ pub fn create_token(profile_id: Uuid, primary_address: &str, secret: &str) -> Re
     let claims = Claims {
         profile_id,
         primary_address: primary_address.to_string(),
+        token_version,
         exp,
     };
 
