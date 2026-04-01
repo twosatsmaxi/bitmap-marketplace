@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
         std::env::var("RENDER_API_BASE").unwrap_or_else(|_| "http://r2d2.local:3020".to_string());
 
     let jwt_secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "bitmap-marketplace-dev-secret".to_string());
+        .expect("JWT_SECRET must be set (use a strong random secret in production)");
 
     let state = AppState {
         db,
