@@ -35,6 +35,7 @@ pub struct AppState {
     pub ord_client: OrdClient,
     pub render_api_base: String,
     pub network: Network,
+    pub jwt_secret: String,
 }
 
 #[tokio::main]
@@ -112,6 +113,9 @@ async fn main() -> Result<()> {
     let render_api_base =
         std::env::var("RENDER_API_BASE").unwrap_or_else(|_| "http://r2d2.local:3020".to_string());
 
+    let jwt_secret = std::env::var("JWT_SECRET")
+        .unwrap_or_else(|_| "bitmap-marketplace-dev-secret".to_string());
+
     let state = AppState {
         db,
         ws_broadcaster: ws_broadcaster.clone(),
@@ -120,6 +124,7 @@ async fn main() -> Result<()> {
         ord_client: OrdClient::new(),
         render_api_base,
         network,
+        jwt_secret,
     };
 
     // Per-IP rate limiting config.
