@@ -177,6 +177,8 @@ fn buy_psbt_populates_real_buyer_prevout_metadata() {
         buyer_address: BUYER_ADDR.to_string(),
         buyer_funding_input: buyer_input.clone(),
         fee_rate_sat_vb: 10.0,
+        marketplace_fee_address: None,
+        marketplace_fee_bps: 0,
     })
     .unwrap();
     let psbt = decode_psbt(&result.psbt_hex).unwrap();
@@ -204,6 +206,8 @@ fn buy_psbt_rejects_wrapped_segwit_without_redeem_script() {
         buyer_address: BUYER_ADDR.to_string(),
         buyer_funding_input: buyer_input,
         fee_rate_sat_vb: 10.0,
+        marketplace_fee_address: None,
+        marketplace_fee_bps: 0,
     })
     .unwrap_err();
 
@@ -225,6 +229,8 @@ fn locking_psbt_populates_real_funding_metadata() {
         marketplace_pubkey_hex: bitcoin_pubkey(&secret_key(7)).to_string(),
         network: Network::Bitcoin,
         min_relay_fee_rate_sat_vb: None,
+        seller_address: SELLER_ADDR.to_string(),
+        price_sats: 50_000,
     };
 
     let result = build_locking_psbt(&req).unwrap();
@@ -236,6 +242,22 @@ fn locking_psbt_populates_real_funding_metadata() {
         inscription_input.value_sats
     );
     assert!(psbt.inputs[0].witness_script.is_none());
+
+    // Verify sale template output[0] uses real seller_address and price_sats
+    let sale_template = decode_psbt(&result.sale_template_psbt_hex).unwrap();
+    assert_eq!(sale_template.unsigned_tx.output.len(), 1);
+    assert_eq!(
+        sale_template.unsigned_tx.output[0].value.to_sat(),
+        req.price_sats
+    );
+    let expected_seller_script = Address::from_str(SELLER_ADDR)
+        .unwrap()
+        .assume_checked()
+        .script_pubkey();
+    assert_eq!(
+        sale_template.unsigned_tx.output[0].script_pubkey,
+        expected_seller_script
+    );
 }
 
 #[test]
@@ -252,6 +274,8 @@ fn locking_psbt_requires_gas_below_threshold() {
         marketplace_pubkey_hex: bitcoin_pubkey(&secret_key(10)).to_string(),
         network: Network::Bitcoin,
         min_relay_fee_rate_sat_vb: None,
+        seller_address: SELLER_ADDR.to_string(),
+        price_sats: 50_000,
     };
 
     let err = build_locking_psbt(&req).unwrap_err();
@@ -272,6 +296,8 @@ fn locking_psbt_rejects_insufficient_gas_funding() {
         marketplace_pubkey_hex: bitcoin_pubkey(&secret_key(14)).to_string(),
         network: Network::Bitcoin,
         min_relay_fee_rate_sat_vb: Some(1.0),
+        seller_address: SELLER_ADDR.to_string(),
+        price_sats: 50_000,
     };
 
     let err = build_locking_psbt(&req).unwrap_err();
@@ -310,10 +336,14 @@ fn protected_sale_psbt_populates_multisig_and_buyer_metadata() {
         multisig_vout: 0,
         multisig_script_hex: hex::encode(witness_script.as_bytes()),
         seller_address: SELLER_ADDR.to_string(),
+        seller_pubkey_hex: seller_pubkey.to_string(),
         price_sats: 50_000,
         buyer_address: BUYER_ADDR.to_string(),
         buyer_funding_input: buyer_input.clone(),
         fee_rate_sat_vb: 5.0,
+        marketplace_fee_address: None,
+        marketplace_fee_bps: 0,
+        seller_sale_sig_hex: None,
     })
     .unwrap();
     let psbt = decode_psbt(&result.psbt_hex).unwrap();
@@ -407,10 +437,14 @@ fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
             multisig_vout: 0,
             multisig_script_hex: hex::encode(witness_script.as_bytes()),
             seller_address: SELLER_ADDR.to_string(),
+            seller_pubkey_hex: seller_pubkey.to_string(),
             price_sats: 50_000,
             buyer_address: BUYER_ADDR.to_string(),
             buyer_funding_input: buyer_input,
             fee_rate_sat_vb: 5.0,
+            marketplace_fee_address: None,
+            marketplace_fee_bps: 0,
+            seller_sale_sig_hex: None,
         })
         .unwrap()
         .psbt_hex,
