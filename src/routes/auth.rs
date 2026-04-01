@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::sync::LazyLock;
-
 use axum::{
     extract::{Path, Query, State},
     http::{header::SET_COOKIE, HeaderMap},
@@ -9,7 +6,6 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 
 use crate::{
     db::profiles::{Profile, ProfileWallet},
@@ -19,18 +15,15 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
-// Challenge store
+// Challenge store (lives in AppState, not a global static)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
-struct Challenge {
-    message: String,
-    address: String,
-    expires_at: chrono::DateTime<chrono::Utc>,
+pub struct Challenge {
+    pub message: String,
+    pub address: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
-
-static CHALLENGES: LazyLock<RwLock<HashMap<String, Challenge>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 // ---------------------------------------------------------------------------
 // Router
@@ -102,7 +95,6 @@ struct WalletResponse {
 // ---------------------------------------------------------------------------
 
 fn extract_token(headers: &HeaderMap) -> Option<String> {
-    // Try Authorization header first
     if let Some(token) = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
@@ -111,7 +103,6 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
     {
         return Some(token);
     }
-    // Fallback: read from cookie
     headers
         .get("Cookie")
         .and_then(|v| v.to_str().ok())
@@ -122,6 +113,27 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
                     c.strip_prefix("bitmap_token=").map(|t| t.to_string())
                 })
         })
+}
+
+/// Authenticate a request: extract token, verify JWT, load profile, check token_version.
+async fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<Profile, AppError> {
+    let token_str = extract_token(headers)
+        .ok_or_else(|| AppError::Unauthorized("Missing authorization token".to_string()))?;
+
+    let claims = jwt::verify_token(&token_str, &state.jwt_secret)
+        .map_err(|_| AppError::Unauthorized("Invalid or expired token".to_string()))?;
+
+    let profile = state
+        .db
+        .get_profile_by_id(claims.profile_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
+
+    if profile.token_version != claims.token_version {
+        return Err(AppError::Unauthorized("Token has been revoked".into()));
+    }
+
+    Ok(profile)
 }
 
 fn auth_response_with_cookie(auth_resp: AuthResponse, token: &str) -> impl IntoResponse {
@@ -158,9 +170,9 @@ fn build_profile_response(profile: &Profile, wallets: &[ProfileWallet]) -> Profi
 // ---------------------------------------------------------------------------
 
 async fn get_challenge(
+    State(state): State<AppState>,
     Query(query): Query<ChallengeQuery>,
 ) -> Result<Json<ChallengeResponse>, AppError> {
-    // Generate 16-byte random nonce as hex
     let nonce_bytes: [u8; 16] = rand::random();
     let nonce = hex::encode(nonce_bytes);
 
@@ -175,11 +187,8 @@ async fn get_challenge(
         query.address, nonce, issued_at, expiration_time
     );
 
-    // Store challenge keyed by nonce
     {
-        let mut challenges = CHALLENGES.write().await;
-        // Cleanup expired challenges while we're here
-        let now = chrono::Utc::now();
+        let mut challenges = state.challenges.write().await;
         challenges.retain(|_, c| c.expires_at > now);
 
         challenges.insert(
@@ -211,7 +220,7 @@ async fn connect_wallet(
 ) -> Result<impl IntoResponse, AppError> {
     // 1. Verify the challenge exists and hasn't expired
     {
-        let mut challenges = CHALLENGES.write().await;
+        let mut challenges = state.challenges.write().await;
         let challenge = challenges
             .remove(&body.nonce)
             .ok_or_else(|| AppError::BadRequest("Invalid or expired challenge nonce".into()))?;
@@ -318,24 +327,8 @@ async fn get_profile(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ProfileResponse>, AppError> {
-    let token_str = extract_token(&headers)
-        .ok_or_else(|| AppError::Unauthorized("Missing authorization token".to_string()))?;
-
-    let claims = jwt::verify_token(&token_str, &state.jwt_secret)
-        .map_err(|_| AppError::Unauthorized("Invalid or expired token".to_string()))?;
-
-    let profile = state
-        .db
-        .get_profile_by_id(claims.profile_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
-
-    if profile.token_version != claims.token_version {
-        return Err(AppError::Unauthorized("Token has been revoked".into()));
-    }
-
+    let profile = authenticate(&headers, &state).await?;
     let wallets = state.db.get_profile_wallets(profile.id).await?;
-
     Ok(Json(build_profile_response(&profile, &wallets)))
 }
 
@@ -348,45 +341,23 @@ async fn remove_wallet(
     headers: HeaderMap,
     Path(address): Path<String>,
 ) -> Result<Json<ProfileResponse>, AppError> {
-    let token_str = extract_token(&headers)
-        .ok_or_else(|| AppError::Unauthorized("Missing authorization token".to_string()))?;
+    let profile = authenticate(&headers, &state).await?;
 
-    let claims = jwt::verify_token(&token_str, &state.jwt_secret)
-        .map_err(|_| AppError::Unauthorized("Invalid or expired token".to_string()))?;
-
-    let profile = state
-        .db
-        .get_profile_by_id(claims.profile_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
-
-    if profile.token_version != claims.token_version {
-        return Err(AppError::Unauthorized("Token has been revoked".into()));
-    }
-
-    let wallet_count = state.db.count_profile_wallets(claims.profile_id).await?;
-    if wallet_count <= 1 {
-        return Err(AppError::BadRequest(
-            "Cannot remove last wallet".to_string(),
-        ));
-    }
-
+    // remove_wallet_from_profile checks count internally and returns false if last wallet
     let removed = state
         .db
-        .remove_wallet_from_profile(claims.profile_id, &address)
+        .remove_wallet_from_profile(profile.id, &address)
         .await?;
 
     if !removed {
+        // Could be last wallet or wallet not found — check which
+        let wallet_count = state.db.count_profile_wallets(profile.id).await?;
+        if wallet_count <= 1 {
+            return Err(AppError::BadRequest("Cannot remove last wallet".to_string()));
+        }
         return Err(AppError::NotFound("Wallet not found".to_string()));
     }
 
-    let profile = state
-        .db
-        .get_profile_by_id(claims.profile_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
-
     let wallets = state.db.get_profile_wallets(profile.id).await?;
-
     Ok(Json(build_profile_response(&profile, &wallets)))
 }

@@ -36,6 +36,9 @@ pub struct AppState {
     pub render_api_base: String,
     pub network: Network,
     pub jwt_secret: String,
+    pub marketplace_fee_address: Option<String>,
+    pub marketplace_fee_bps: u64,
+    pub challenges: Arc<tokio::sync::RwLock<std::collections::HashMap<String, routes::auth::Challenge>>>,
 }
 
 #[tokio::main]
@@ -116,6 +119,12 @@ async fn main() -> Result<()> {
     let jwt_secret = std::env::var("JWT_SECRET")
         .expect("JWT_SECRET must be set (use a strong random secret in production)");
 
+    let marketplace_fee_address = std::env::var("MARKETPLACE_FEE_ADDRESS").ok();
+    let marketplace_fee_bps: u64 = std::env::var("MARKETPLACE_FEE_BPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
     let state = AppState {
         db,
         ws_broadcaster: ws_broadcaster.clone(),
@@ -125,6 +134,9 @@ async fn main() -> Result<()> {
         render_api_base,
         network,
         jwt_secret,
+        marketplace_fee_address,
+        marketplace_fee_bps,
+        challenges: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Per-IP rate limiting config.

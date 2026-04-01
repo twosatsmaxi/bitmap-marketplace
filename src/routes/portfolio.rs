@@ -214,6 +214,11 @@ async fn get_multi_portfolio(
         }
     }
 
+    const MAX_INSCRIPTION_IDS: usize = 5000;
+    if all_inscription_ids.len() > MAX_INSCRIPTION_IDS {
+        all_inscription_ids.truncate(MAX_INSCRIPTION_IDS);
+    }
+
     if all_inscription_ids.is_empty() {
         return Ok(Json(MultiPortfolioResponse {
             addresses: req.addresses,

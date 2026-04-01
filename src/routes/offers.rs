@@ -139,12 +139,8 @@ async fn accept_offer(
 
     let rpc = crate::services::bitcoin_rpc::BitcoinRpc::new().map_err(AppError::Internal)?;
 
-    let marketplace_fee_bps: u64 = std::env::var("MARKETPLACE_FEE_BPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
     let marketplace_fee_sats =
-        calculate_marketplace_fee(offer.price_sats as u64, marketplace_fee_bps) as i64;
+        calculate_marketplace_fee(offer.price_sats as u64, state.marketplace_fee_bps) as i64;
 
     // Broadcast based on protection status
     let (sale_tx_id, locking_tx_id) = if listing.protection_status == "active" {
@@ -168,26 +164,8 @@ async fn accept_offer(
         )
         .map_err(AppError::Internal)?;
 
-        // Pre-broadcast UTXO liveness check.
-        let locking_tx = bitcoin::consensus::deserialize::<bitcoin::Transaction>(
-            &hex::decode(locking_raw_tx)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?,
-        )
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
-        for input in &locking_tx.input {
-            let txid = input.previous_output.txid.to_string();
-            let vout = input.previous_output.vout;
-            if rpc
-                .get_utxo_info(&txid, vout)
-                .map_err(AppError::Internal)?
-                .is_none()
-            {
-                return Err(AppError::Conflict(format!(
-                    "locking tx input {}:{} is already spent; seller may have moved the inscription",
-                    txid, vout
-                )));
-            }
-        }
+        rpc.verify_locking_tx_inputs_unspent(locking_raw_tx)
+            .map_err(|e| AppError::Conflict(e.to_string()))?;
 
         let txids = rpc
             .submit_package(&[locking_raw_tx, &sale_raw_tx])

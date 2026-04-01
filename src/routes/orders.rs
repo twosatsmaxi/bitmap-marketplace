@@ -84,12 +84,6 @@ async fn buy(
             AppError::BadRequest("buyer_funding_input required for protected purchase".to_string())
         })?;
 
-        let marketplace_fee_address = std::env::var("MARKETPLACE_FEE_ADDRESS").ok();
-        let marketplace_fee_bps: u64 = std::env::var("MARKETPLACE_FEE_BPS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-
         let psbt_req = ProtectedSalePsbtRequest {
             locking_raw_tx_hex: locking_raw_tx,
             multisig_vout: 0,
@@ -100,8 +94,8 @@ async fn buy(
             buyer_address: req.buyer_address.clone(),
             buyer_funding_input: map_spendable_input(buyer_funding_input),
             fee_rate_sat_vb: req.fee_rate_sat_vb.unwrap_or(5.0),
-            marketplace_fee_address,
-            marketplace_fee_bps,
+            marketplace_fee_address: state.marketplace_fee_address.clone(),
+            marketplace_fee_bps: state.marketplace_fee_bps,
             seller_sale_sig_hex: listing.seller_sale_sig,
         };
 
@@ -121,12 +115,6 @@ async fn buy(
         .psbt
         .ok_or_else(|| AppError::BadRequest("listing has no PSBT".to_string()))?;
 
-    let marketplace_fee_address = std::env::var("MARKETPLACE_FEE_ADDRESS").ok();
-    let marketplace_fee_bps: u64 = std::env::var("MARKETPLACE_FEE_BPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-
     let buy_req = BuyRequest {
         seller_psbt_hex,
         buyer_address: req.buyer_address.clone(),
@@ -136,8 +124,8 @@ async fn buy(
                 .ok_or_else(|| AppError::BadRequest("buyer_funding_input required".to_string()))?,
         ),
         fee_rate_sat_vb: req.fee_rate_sat_vb.unwrap_or(5.0),
-        marketplace_fee_address,
-        marketplace_fee_bps,
+        marketplace_fee_address: state.marketplace_fee_address.clone(),
+        marketplace_fee_bps: state.marketplace_fee_bps,
     };
 
     let result = build_buy_psbt(&buy_req).map_err(|e| AppError::Internal(e))?;
@@ -193,12 +181,8 @@ async fn confirm_order(
 
     let buyer_address = req.buyer_address.unwrap_or_else(|| "unknown".to_string());
 
-    let marketplace_fee_bps: u64 = std::env::var("MARKETPLACE_FEE_BPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
     let marketplace_fee_sats =
-        calculate_marketplace_fee(listing.price_sats as u64, marketplace_fee_bps) as i64;
+        calculate_marketplace_fee(listing.price_sats as u64, state.marketplace_fee_bps) as i64;
 
     if listing.protection_status == "active" {
         // Protected flow.
@@ -209,12 +193,10 @@ async fn confirm_order(
             .seller_pubkey
             .ok_or_else(|| AppError::Internal(anyhow::anyhow!("missing seller_pubkey")))?;
 
-        // Apply marketplace SIGHASH_ALL co-sig.
         let cosigned_psbt =
             apply_marketplace_signature(&req.signed_psbt, &state.marketplace_keypair)
                 .map_err(|e| AppError::Internal(e))?;
 
-        // Finalize P2WSH witness and extract raw sale tx.
         let sale_raw_tx = finalize_multisig_and_extract(
             &cosigned_psbt,
             &seller_pubkey,
@@ -222,23 +204,9 @@ async fn confirm_order(
         )
         .map_err(|e| AppError::Internal(e))?;
 
-        // Pre-broadcast UTXO liveness check: verify locking tx inputs are still unspent.
-        let locking_tx = bitcoin::consensus::deserialize::<bitcoin::Transaction>(
-            &hex::decode(&locking_raw_tx).map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?,
-        )
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
-        for input in &locking_tx.input {
-            let txid = input.previous_output.txid.to_string();
-            let vout = input.previous_output.vout;
-            if rpc.get_utxo_info(&txid, vout).map_err(AppError::Internal)?.is_none() {
-                return Err(AppError::Conflict(format!(
-                    "locking tx input {}:{} is already spent; seller may have moved the inscription",
-                    txid, vout
-                )));
-            }
-        }
+        rpc.verify_locking_tx_inputs_unspent(&locking_raw_tx)
+            .map_err(|e| AppError::Conflict(e.to_string()))?;
 
-        // Package broadcast: [locking_tx, sale_tx].
         let txids = rpc
             .submit_package(&[&locking_raw_tx, &sale_raw_tx])
             .map_err(|e| AppError::Internal(e))?;
