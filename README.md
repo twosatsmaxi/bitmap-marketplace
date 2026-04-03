@@ -33,6 +33,7 @@ Copy `.env.example` to `.env` and configure:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `FRONTEND_URL` | **NEW**: CORS origin restriction (production) | (unset = allow any) |
+| `ALLOWED_ADDRESS_NETWORK` | **NEW**: Which network addresses auth accepts (`bitcoin`/`testnet`/`regtest`) | `bitcoin` |
 | `BITCOIN_RPC_URL` | Bitcoin Core JSON-RPC endpoint | `http://127.0.0.1:8332` |
 | `BITCOIN_NETWORK` | Network (mainnet/testnet/regtest) | `regtest` |
 | `ORD_URL` | ord indexer URL | `http://127.0.0.1:80` |

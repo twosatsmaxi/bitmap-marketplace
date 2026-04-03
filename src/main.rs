@@ -38,6 +38,7 @@ pub struct AppState {
     pub ord_client: OrdClient,
     pub render_api_base: String,
     pub network: Network,
+    pub allowed_address_network: Network,
     pub jwt_secret: String,
     pub marketplace_fee_address: Option<String>,
     pub marketplace_fee_bps: u64,
@@ -116,6 +117,12 @@ async fn main() -> Result<()> {
         .and_then(|value| Network::from_str(&value).ok())
         .unwrap_or(Network::Regtest);
 
+    // Network to validate addresses against in auth flow (defaults to mainnet)
+    let allowed_address_network = std::env::var("ALLOWED_ADDRESS_NETWORK")
+        .ok()
+        .and_then(|value| Network::from_str(&value).ok())
+        .unwrap_or(Network::Bitcoin);
+
     let render_api_base =
         std::env::var("RENDER_API_BASE").unwrap_or_else(|_| "http://r2d2.local:3020".to_string());
 
@@ -138,6 +145,7 @@ async fn main() -> Result<()> {
         ord_client: OrdClient::new(),
         render_api_base,
         network,
+        allowed_address_network,
         jwt_secret,
         marketplace_fee_address,
         marketplace_fee_bps,
