@@ -104,6 +104,25 @@ impl BitcoinRpc {
         }
     }
 
+    /// Verify all inputs of a locking transaction are still unspent.
+    /// Returns an error describing the first spent input, or Ok(()) if all are live.
+    pub fn verify_locking_tx_inputs_unspent(&self, locking_raw_tx_hex: &str) -> Result<()> {
+        let locking_tx: Transaction = deserialize(
+            &hex::decode(locking_raw_tx_hex)?,
+        )?;
+        for input in &locking_tx.input {
+            let txid = input.previous_output.txid.to_string();
+            let vout = input.previous_output.vout;
+            if self.get_utxo_info(&txid, vout)?.is_none() {
+                return Err(anyhow!(
+                    "locking tx input {}:{} is already spent; seller may have moved the inscription",
+                    txid, vout
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Estimates the fee rate for confirmation within `target_blocks` blocks.
     /// Converts the `estimatesmartfee` result from BTC/kvB to sat/vB.
     pub fn estimate_fee_rate(&self, target_blocks: u16) -> Result<FeeEstimate> {

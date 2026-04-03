@@ -2,6 +2,7 @@ use crate::AppState;
 use axum::Router;
 
 mod activity;
+pub mod auth;
 mod bitmaps;
 mod collections;
 mod explore;
@@ -22,4 +23,9 @@ pub fn router() -> Router<AppState> {
         .nest("/offers", offers::router())
         .nest("/orders", orders::router())
         .nest("/portfolio", portfolio::router())
+    // NOTE: auth is mounted separately in main.rs with stricter rate limiting
+}
+
+pub fn auth_router() -> Router<AppState> {
+    auth::router()
 }

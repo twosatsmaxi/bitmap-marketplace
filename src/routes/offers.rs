@@ -5,7 +5,8 @@ use crate::{
     models::offer::{Offer, OfferStatus},
     models::sale::Sale,
     services::psbt::{
-        apply_marketplace_signature, finalize_and_extract, finalize_multisig_and_extract,
+        apply_marketplace_signature, calculate_marketplace_fee, finalize_and_extract,
+        finalize_multisig_and_extract,
     },
     ws::WsEvent,
     AppState,
@@ -138,6 +139,9 @@ async fn accept_offer(
 
     let rpc = crate::services::bitcoin_rpc::BitcoinRpc::new().map_err(AppError::Internal)?;
 
+    let marketplace_fee_sats =
+        calculate_marketplace_fee(offer.price_sats as u64, state.marketplace_fee_bps) as i64;
+
     // Broadcast based on protection status
     let (sale_tx_id, locking_tx_id) = if listing.protection_status == "active" {
         // Protected flow: apply marketplace co-sig, finalize P2WSH, broadcast package
@@ -159,6 +163,9 @@ async fn accept_offer(
             &state.marketplace_keypair.pubkey_hex(),
         )
         .map_err(AppError::Internal)?;
+
+        rpc.verify_locking_tx_inputs_unspent(locking_raw_tx)
+            .map_err(|e| AppError::Conflict(e.to_string()))?;
 
         let txids = rpc
             .submit_package(&[locking_raw_tx, &sale_raw_tx])
@@ -207,7 +214,7 @@ async fn accept_offer(
         seller_address: listing.seller_address.clone(),
         buyer_address: offer.buyer_address.clone(),
         price_sats: offer.price_sats,
-        royalty_sats: 0,
+        marketplace_fee_sats,
         tx_id: Some(sale_tx_id.clone()),
         locking_tx_id: locking_tx_id.clone(),
         block_height: None,
@@ -215,7 +222,7 @@ async fn accept_offer(
         created_at: Utc::now(),
     };
     sqlx::query(
-        r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, royalty_sats, tx_id, locking_tx_id, block_height, confirmed_at)
+        r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, marketplace_fee_sats, tx_id, locking_tx_id, block_height, confirmed_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
     )
     .bind(sale.id)
@@ -224,7 +231,7 @@ async fn accept_offer(
     .bind(&sale.seller_address)
     .bind(&sale.buyer_address)
     .bind(sale.price_sats)
-    .bind(sale.royalty_sats)
+    .bind(sale.marketplace_fee_sats)
     .bind(&sale.tx_id)
     .bind(&sale.locking_tx_id)
     .bind(sale.block_height)

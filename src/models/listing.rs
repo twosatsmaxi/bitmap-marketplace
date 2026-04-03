@@ -20,8 +20,6 @@ pub struct Listing {
     pub status: ListingStatus,
     /// Partially-signed Bitcoin transaction (hex-encoded)
     pub psbt: Option<String>,
-    pub royalty_address: Option<String>,
-    pub royalty_bps: Option<i32>, // basis points
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     // Mempool protection fields
@@ -30,6 +28,8 @@ pub struct Listing {
     pub multisig_script: Option<String>,
     /// Signed locking raw tx hex — stored but NOT yet broadcast.
     pub locking_raw_tx: Option<String>,
+    /// Seller's pre-signed partial_sig (hex) for the sale template multisig input.
+    pub seller_sale_sig: Option<String>,
     pub protection_status: String,
     /// Which marketplace this listing was imported from (e.g. "magic_eden"). NULL = native listing.
     pub source_marketplace: Option<String>,

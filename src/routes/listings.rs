@@ -5,7 +5,8 @@ use crate::{
     models::listing::{CreateListingRequest, Listing, ListingStatus, SpendableInputRequest},
     services::magic_eden,
     services::psbt::{
-        build_locking_psbt, decode_psbt, LockingPsbtRequest, SpendableInput, WitnessUtxo,
+        build_locking_psbt, decode_psbt, extract_seller_sale_sig, LockingPsbtRequest,
+        SpendableInput, WitnessUtxo,
     },
     ws::WsEvent,
     AppState,
@@ -148,7 +149,7 @@ async fn create_listing(
     Json(req): Json<CreateListingRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     // If seller_pubkey is provided, build the locking PSBT for mempool protection.
-    let (locking_psbt_hex, multisig_address, multisig_script, protection_status) =
+    let (locking_psbt_hex, sale_template_psbt_hex, multisig_address, multisig_script, protection_status) =
         if let Some(ref seller_pubkey_hex) = req.seller_pubkey {
             // Validate the pubkey parses.
             PublicKey::from_str(seller_pubkey_hex).map_err(|_| {
@@ -168,18 +169,21 @@ async fn create_listing(
                 marketplace_pubkey_hex: state.marketplace_keypair.pubkey_hex(),
                 network: state.network,
                 min_relay_fee_rate_sat_vb: None,
+                seller_address: req.seller_address.clone(),
+                price_sats: req.price_sats as u64,
             };
 
             let locking = build_locking_psbt(&locking_req).map_err(|e| AppError::Internal(e))?;
 
             (
                 Some(locking.psbt_hex),
+                Some(locking.sale_template_psbt_hex),
                 Some(locking.multisig_address),
                 Some(locking.multisig_script_hex),
                 "locking_pending".to_string(),
             )
         } else {
-            (None, None, None, "none".to_string())
+            (None, None, None, None, "none".to_string())
         };
 
     let listing = Listing {
@@ -189,14 +193,13 @@ async fn create_listing(
         price_sats: req.price_sats,
         status: ListingStatus::Active,
         psbt: req.unsigned_psbt.clone(),
-        royalty_address: None,
-        royalty_bps: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         seller_pubkey: req.seller_pubkey.clone(),
         multisig_address,
         multisig_script,
         locking_raw_tx: None, // set after seller signs and calls /submit-locking
+        seller_sale_sig: None, // set after seller signs the sale template
         protection_status,
         source_marketplace: None,
     };
@@ -232,6 +235,9 @@ async fn create_listing(
     let mut resp = serde_json::json!(created);
     if let Some(psbt_hex) = locking_psbt_hex {
         resp["locking_psbt"] = serde_json::Value::String(psbt_hex);
+    }
+    if let Some(sale_template_hex) = sale_template_psbt_hex {
+        resp["sale_template_psbt"] = serde_json::Value::String(sale_template_hex);
     }
 
     Ok(Json(resp))
@@ -320,11 +326,14 @@ async fn confirm_listing(
 struct SubmitLockingRequest {
     /// Hex of the seller-signed locking PSBT (or raw transaction hex).
     signed_locking_psbt: String,
+    /// Hex of the seller-signed sale template PSBT (signed with SIGHASH_SINGLE|ANYONECANPAY).
+    signed_sale_template_psbt: String,
 }
 
 /// POST /:id/submit-locking
-/// Seller calls this after signing the locking PSBT returned by create_listing.
-/// Validates the PSBT, extracts the raw tx hex, stores it, and marks the listing active.
+/// Seller calls this after signing BOTH the locking PSBT and the sale template PSBT.
+/// Validates and finalizes the locking PSBT, extracts the seller's sale pre-signature,
+/// stores both, and marks the listing active.
 /// Nothing is broadcast here — the locking tx is held until purchase time.
 async fn submit_locking(
     State(state): State<AppState>,
@@ -342,6 +351,10 @@ async fn submit_locking(
         )));
     }
 
+    let seller_pubkey = listing.seller_pubkey.as_deref().ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!("listing in locking_pending but missing seller_pubkey"))
+    })?;
+
     // Validate it's a valid PSBT hex (structural check).
     decode_psbt(&req.signed_locking_psbt)
         .map_err(|e| AppError::BadRequest(format!("invalid locking PSBT: {}", e)))?;
@@ -350,17 +363,23 @@ async fn submit_locking(
     let raw_tx_hex = crate::services::psbt::finalize_locking_psbt(&req.signed_locking_psbt)
         .map_err(|e| AppError::BadRequest(format!("could not finalize locking PSBT: {}", e)))?;
 
-    // Store and activate.
+    // Extract seller's partial_sig from the signed sale template.
+    let seller_sale_sig = extract_seller_sale_sig(&req.signed_sale_template_psbt, seller_pubkey)
+        .map_err(|e| {
+            AppError::BadRequest(format!("could not extract seller sale signature: {}", e))
+        })?;
+
+    // Store locking tx, seller sale sig, and activate.
     state
         .db
-        .update_locking_tx(id, &raw_tx_hex, "active")
+        .update_locking_tx(id, &raw_tx_hex, Some(&seller_sale_sig), "active")
         .await
         .map_err(AppError::Internal)?;
 
     Ok(Json(serde_json::json!({
         "listing_id": id,
         "protection_status": "active",
-        "message": "Locking transaction stored. Listing is now protected and purchasable."
+        "message": "Locking transaction and seller sale signature stored. Listing is now protected and purchasable."
     })))
 }
 
@@ -412,14 +431,13 @@ async fn import_listings(
             price_sats: me.price_sats,
             status: ListingStatus::Active,
             psbt: me.signed_psbt,
-            royalty_address: None,
-            royalty_bps: None,
             created_at: now,
             updated_at: now,
             seller_pubkey: None,
             multisig_address: None,
             multisig_script: None,
             locking_raw_tx: None,
+            seller_sale_sig: None,
             protection_status: "none".to_string(),
             source_marketplace: Some(magic_eden::NAME.to_string()),
         };

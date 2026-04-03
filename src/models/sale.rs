@@ -10,7 +10,7 @@ pub struct Sale {
     pub seller_address: String,
     pub buyer_address: String,
     pub price_sats: i64,
-    pub royalty_sats: i64,
+    pub marketplace_fee_sats: i64,
     pub tx_id: Option<String>,
     pub locking_tx_id: Option<String>,
     pub block_height: Option<i64>,

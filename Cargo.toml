@@ -34,6 +34,11 @@ bytes = "1"
 dotenvy = "0.15"
 tokio-tungstenite = "0.21"
 hex = "0.4"
+jsonwebtoken = "9"
+bip322 = "0.0.10"
+rand = "0.8"
+futures = "0.3"
+lru = "0.12"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

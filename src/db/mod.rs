@@ -9,6 +9,7 @@ pub mod collections;
 pub mod inscriptions;
 pub mod listings;
 pub mod offers;
+pub mod profiles;
 pub mod sales;
 
 #[derive(Clone)]
