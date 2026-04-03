@@ -26,8 +26,11 @@ use crate::db::Database;
 use crate::services::marketplace_keypair::MarketplaceKeypair;
 use crate::services::ord::OrdClient;
 
-/// Maximum number of pending auth challenges to store (LRU eviction)
-const MAX_CHALLENGES: usize = 10_000;
+/// Maximum number of pending auth challenges to store
+const MAX_CHALLENGES: u64 = 10_000;
+
+/// Challenge nonces expire after this duration
+const CHALLENGE_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -42,7 +45,7 @@ pub struct AppState {
     pub jwt_secret: String,
     pub marketplace_fee_address: Option<String>,
     pub marketplace_fee_bps: u64,
-    pub challenges: Arc<tokio::sync::RwLock<lru::LruCache<String, routes::auth::Challenge>>>,
+    pub challenges: moka::sync::Cache<String, routes::auth::Challenge>,
 }
 
 #[tokio::main]
@@ -149,9 +152,10 @@ async fn main() -> Result<()> {
         jwt_secret,
         marketplace_fee_address,
         marketplace_fee_bps,
-        challenges: Arc::new(tokio::sync::RwLock::new(lru::LruCache::new(
-            std::num::NonZeroUsize::new(MAX_CHALLENGES).unwrap(),
-        ))),
+        challenges: moka::sync::Cache::builder()
+            .max_capacity(MAX_CHALLENGES)
+            .time_to_live(CHALLENGE_TTL)
+            .build(),
     };
 
     // Per-IP rate limiting config.

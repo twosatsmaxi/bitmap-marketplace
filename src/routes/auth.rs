@@ -214,20 +214,14 @@ async fn get_challenge(
         query.address, nonce, issued_at, expiration_time
     );
 
-    {
-        let mut challenges = state.challenges.write().await;
-        // LRU cache automatically evicts oldest entries when max size is reached
-        // No need for manual cleanup - LRU eviction handles DoS protection
-
-        challenges.put(
-            nonce.clone(),
-            Challenge {
-                message: message.clone(),
-                address: query.address,
-                expires_at,
-            },
-        );
-    }
+    state.challenges.insert(
+        nonce.clone(),
+        Challenge {
+            message: message.clone(),
+            address: query.address,
+            expires_at,
+        },
+    );
 
     Ok(Json(ChallengeResponse {
         message,
@@ -265,12 +259,9 @@ async fn connect_wallet(
 
     // 1. Verify the challenge exists and hasn't expired
     let challenge = {
-        let mut challenges = state.challenges.write().await;
-        // LRU cache automatically evicts old entries when max size is reached
-        
-        challenges
-            .pop(&body.nonce)
-            .ok_or_else(|| AppError::BadRequest("Invalid or expired challenge nonce".into()))?
+        state.challenges
+            .remove(&body.nonce)
+            .ok_or_else(|| AppError::BadRequest("Challenge nonce not found — it may have expired or been invalidated. Please request a new challenge and try again.".into()))?
     };
 
     // Use the captured time for expiration check (TOCTOU fix)
