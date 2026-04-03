@@ -6,7 +6,6 @@ use axum::{
     Json, Router,
 };
 use bitcoin::address::NetworkUnchecked;
-use bitcoin::Network;
 use serde::{Deserialize, Serialize};
 
 
@@ -50,17 +49,13 @@ struct ChallengeQuery {
 }
 
 /// Validates a Bitcoin address string without requiring RPC.
-/// Returns true if the address is syntactically valid for the given network.
-fn validate_bitcoin_address(address: &str, network: Network) -> bool {
-    // First, try to parse as an unchecked address
-    let unchecked = match address.parse::<bitcoin::Address<NetworkUnchecked>>() {
-        Ok(a) => a,
-        Err(_) => return false,
-    };
-    
-    // Check if the address is valid for the specified network
-    // This validates bech32 encoding, checksums, and network compatibility
-    unchecked.is_valid_for_network(network)
+/// Returns true if the address is syntactically valid ( proper bech32/bech32m 
+/// encoding, valid checksum). Accepts addresses for any network (mainnet, testnet, 
+/// regtest) - network compatibility is checked later if needed.
+fn validate_bitcoin_address(address: &str) -> bool {
+    // Parse as unchecked address - this validates bech32 encoding and checksum
+    // but doesn't require network-specific prefixes
+    address.parse::<bitcoin::Address<NetworkUnchecked>>().is_ok()
 }
 
 #[derive(Serialize)]
@@ -191,7 +186,7 @@ async fn get_challenge(
     Query(query): Query<ChallengeQuery>,
 ) -> Result<Json<ChallengeResponse>, AppError> {
     // Validate the address format before creating a challenge
-    if !validate_bitcoin_address(&query.address, state.network) {
+    if !validate_bitcoin_address(&query.address) {
         return Err(AppError::BadRequest(format!(
             "Invalid Bitcoin address: {}",
             query.address
@@ -246,13 +241,13 @@ async fn connect_wallet(
     Json(body): Json<ConnectRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // Validate both addresses before processing
-    if !validate_bitcoin_address(&body.payment_address, state.network) {
+    if !validate_bitcoin_address(&body.payment_address) {
         return Err(AppError::BadRequest(format!(
             "Invalid payment address: {}",
             body.payment_address
         )));
     }
-    if !validate_bitcoin_address(&body.ordinals_address, state.network) {
+    if !validate_bitcoin_address(&body.ordinals_address) {
         return Err(AppError::BadRequest(format!(
             "Invalid ordinals address: {}",
             body.ordinals_address
