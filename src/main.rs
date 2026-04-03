@@ -9,7 +9,7 @@ use tower::limit::ConcurrencyLimitLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::GovernorLayer;
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -26,6 +26,9 @@ use crate::db::Database;
 use crate::services::marketplace_keypair::MarketplaceKeypair;
 use crate::services::ord::OrdClient;
 
+/// Maximum number of pending auth challenges to store (LRU eviction)
+const MAX_CHALLENGES: usize = 10_000;
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
@@ -38,7 +41,7 @@ pub struct AppState {
     pub jwt_secret: String,
     pub marketplace_fee_address: Option<String>,
     pub marketplace_fee_bps: u64,
-    pub challenges: Arc<tokio::sync::RwLock<std::collections::HashMap<String, routes::auth::Challenge>>>,
+    pub challenges: Arc<tokio::sync::RwLock<lru::LruCache<String, routes::auth::Challenge>>>,
 }
 
 #[tokio::main]
@@ -119,6 +122,8 @@ async fn main() -> Result<()> {
     let jwt_secret = std::env::var("JWT_SECRET")
         .expect("JWT_SECRET must be set (use a strong random secret in production)");
 
+    let frontend_url = std::env::var("FRONTEND_URL").ok();
+
     let marketplace_fee_address = std::env::var("MARKETPLACE_FEE_ADDRESS").ok();
     let marketplace_fee_bps: u64 = std::env::var("MARKETPLACE_FEE_BPS")
         .ok()
@@ -136,7 +141,9 @@ async fn main() -> Result<()> {
         jwt_secret,
         marketplace_fee_address,
         marketplace_fee_bps,
-        challenges: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        challenges: Arc::new(tokio::sync::RwLock::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(MAX_CHALLENGES).unwrap(),
+        ))),
     };
 
     // Per-IP rate limiting config.
@@ -190,7 +197,7 @@ async fn main() -> Result<()> {
         .merge(ws_router)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive()) // public marketplace; keep permissive
+        .layer(build_cors_layer(frontend_url.as_deref()))
         .with_state(state);
 
     // Read PORT from env (set in .env or environment); default 3000.
@@ -219,4 +226,34 @@ async fn shutdown_signal() {
         .await
         .expect("failed to install CTRL+C handler");
     tracing::info!("shutdown signal received");
+}
+
+/// Build CORS layer with frontend origin restriction.
+/// If FRONTEND_URL is set, restricts to that origin.
+/// Otherwise, allows any origin (development mode).
+fn build_cors_layer(frontend_url: Option<&str>) -> CorsLayer {
+    let mut cors = CorsLayer::new()
+        .allow_methods(Any)
+        .allow_headers(Any);
+    
+    if let Some(origin) = frontend_url {
+        // Production: restrict to specific frontend origin
+        // Note: We don't allow credentials for CORS - cookies are SameSite=Strict
+        match origin.parse::<axum::http::HeaderValue>() {
+            Ok(parsed_origin) => {
+                cors = cors.allow_origin(parsed_origin);
+                tracing::info!("CORS restricted to origin: {}", origin);
+            }
+            Err(e) => {
+                tracing::warn!("Invalid FRONTEND_URL '{}': {}. Allowing any origin.", origin, e);
+                cors = cors.allow_origin(Any);
+            }
+        }
+    } else {
+        // Development: allow any origin
+        cors = cors.allow_origin(Any);
+        tracing::warn!("FRONTEND_URL not set - CORS allowing any origin (development mode)");
+    }
+    
+    cors
 }

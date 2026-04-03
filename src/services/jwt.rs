@@ -1,5 +1,5 @@
 use anyhow::Result;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -35,10 +35,16 @@ pub fn create_token(profile_id: Uuid, primary_address: &str, token_version: i32,
 }
 
 pub fn verify_token(token: &str, secret: &str) -> Result<Claims> {
+    // Explicitly specify HS256 algorithm to prevent "none" algorithm attacks
+    // and ensure only HMAC-SHA256 tokens are accepted
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = true;
+    validation.validate_nbf = false;
+    
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
+        &validation,
     )?;
 
     Ok(token_data.claims)

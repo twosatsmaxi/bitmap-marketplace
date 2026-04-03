@@ -5,7 +5,10 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::Network;
 use serde::{Deserialize, Serialize};
+
 
 use crate::{
     db::profiles::{Profile, ProfileWallet},
@@ -44,6 +47,20 @@ pub fn router() -> Router<AppState> {
 #[derive(Deserialize)]
 struct ChallengeQuery {
     address: String,
+}
+
+/// Validates a Bitcoin address string without requiring RPC.
+/// Returns true if the address is syntactically valid for the given network.
+fn validate_bitcoin_address(address: &str, network: Network) -> bool {
+    // First, try to parse as an unchecked address
+    let unchecked = match address.parse::<bitcoin::Address<NetworkUnchecked>>() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    
+    // Check if the address is valid for the specified network
+    // This validates bech32 encoding, checksums, and network compatibility
+    unchecked.is_valid_for_network(network)
 }
 
 #[derive(Serialize)]
@@ -173,9 +190,18 @@ async fn get_challenge(
     State(state): State<AppState>,
     Query(query): Query<ChallengeQuery>,
 ) -> Result<Json<ChallengeResponse>, AppError> {
+    // Validate the address format before creating a challenge
+    if !validate_bitcoin_address(&query.address, state.network) {
+        return Err(AppError::BadRequest(format!(
+            "Invalid Bitcoin address: {}",
+            query.address
+        )));
+    }
+
     let nonce_bytes: [u8; 16] = rand::random();
     let nonce = hex::encode(nonce_bytes);
 
+    // Capture current time once to prevent TOCTOU issues
     let now = chrono::Utc::now();
     let expires_at = now + chrono::Duration::minutes(10);
 
@@ -189,9 +215,10 @@ async fn get_challenge(
 
     {
         let mut challenges = state.challenges.write().await;
-        challenges.retain(|_, c| c.expires_at > now);
+        // LRU cache automatically evicts oldest entries when max size is reached
+        // No need for manual cleanup - LRU eviction handles DoS protection
 
-        challenges.insert(
+        challenges.put(
             nonce.clone(),
             Challenge {
                 message: message.clone(),
@@ -218,28 +245,49 @@ async fn connect_wallet(
     headers: HeaderMap,
     Json(body): Json<ConnectRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    // 1. Verify the challenge exists and hasn't expired
-    {
-        let mut challenges = state.challenges.write().await;
-        let challenge = challenges
-            .remove(&body.nonce)
-            .ok_or_else(|| AppError::BadRequest("Invalid or expired challenge nonce".into()))?;
-
-        if challenge.expires_at < chrono::Utc::now() {
-            return Err(AppError::BadRequest("Challenge has expired".into()));
-        }
-
-        if challenge.address != body.ordinals_address {
-            return Err(AppError::BadRequest("Challenge address mismatch".into()));
-        }
-
-        if challenge.message != body.message {
-            return Err(AppError::BadRequest("Challenge message mismatch".into()));
-        }
+    // Validate both addresses before processing
+    if !validate_bitcoin_address(&body.payment_address, state.network) {
+        return Err(AppError::BadRequest(format!(
+            "Invalid payment address: {}",
+            body.payment_address
+        )));
+    }
+    if !validate_bitcoin_address(&body.ordinals_address, state.network) {
+        return Err(AppError::BadRequest(format!(
+            "Invalid ordinals address: {}",
+            body.ordinals_address
+        )));
     }
 
-    // 2. Verify BIP-322 signature
-    bip322::verify_simple_encoded(&body.ordinals_address, &body.message, &body.signature)
+    // Capture current time once to prevent TOCTOU issues
+    let now = chrono::Utc::now();
+
+    // 1. Verify the challenge exists and hasn't expired
+    let challenge = {
+        let mut challenges = state.challenges.write().await;
+        // LRU cache automatically evicts old entries when max size is reached
+        
+        challenges
+            .pop(&body.nonce)
+            .ok_or_else(|| AppError::BadRequest("Invalid or expired challenge nonce".into()))?
+    };
+
+    // Use the captured time for expiration check (TOCTOU fix)
+    if challenge.expires_at < now {
+        return Err(AppError::BadRequest("Challenge has expired".into()));
+    }
+
+    if challenge.address != body.ordinals_address {
+        return Err(AppError::BadRequest("Challenge address mismatch".into()));
+    }
+
+    if challenge.message != body.message {
+        return Err(AppError::BadRequest("Challenge message mismatch".into()));
+    }
+
+    // 2. Verify BIP-322 signature against the stored challenge.message
+    // (not body.message) to eliminate any possibility of mismatch
+    bip322::verify_simple_encoded(&body.ordinals_address, &challenge.message, &body.signature)
         .map_err(|e| {
             tracing::warn!(
                 "BIP-322 verification failed for {}: {:?}",
