@@ -80,6 +80,7 @@ struct ConnectRequest {
     signature: String,
     message: String,
     nonce: String,
+    label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -322,7 +323,7 @@ async fn connect_wallet(
                 .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
 
             let wallet_count = db.count_profile_wallets(profile.id).await?;
-            let label = format!("Wallet {}", wallet_count + 1);
+            let label = body.label.clone().unwrap_or_else(|| format!("Wallet {}", wallet_count + 1));
 
             db.add_wallet_to_profile(
                 profile.id,
@@ -348,11 +349,12 @@ async fn connect_wallet(
     // 5. No JWT or invalid JWT — create a brand-new profile.
     let profile = db.create_profile(&body.ordinals_address).await?;
 
+    let label = body.label.clone().unwrap_or_else(|| "Wallet 1".to_string());
     db.add_wallet_to_profile(
         profile.id,
         &body.payment_address,
         &body.ordinals_address,
-        "Wallet 1",
+        &label,
     )
     .await?;
 
