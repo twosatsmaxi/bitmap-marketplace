@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    http::{header::SET_COOKIE, HeaderMap},
+    http::{header::{CACHE_CONTROL, SET_COOKIE}, HeaderMap},
     response::IntoResponse,
     routing::{delete, get, post},
     Json, Router,
@@ -190,7 +190,7 @@ fn build_profile_response(profile: &Profile, wallets: &[ProfileWallet]) -> Profi
 async fn get_challenge(
     State(state): State<AppState>,
     Query(query): Query<ChallengeQuery>,
-) -> Result<Json<ChallengeResponse>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     // Validate the address format before creating a challenge
     if !validate_bitcoin_address(&query.address, state.allowed_address_network) {
         return Err(AppError::BadRequest(format!(
@@ -223,12 +223,15 @@ async fn get_challenge(
         },
     );
 
-    Ok(Json(ChallengeResponse {
-        message,
-        nonce,
-        issued_at,
-        expiration_time,
-    }))
+    Ok((
+        [(CACHE_CONTROL, "no-store, no-cache")],
+        Json(ChallengeResponse {
+            message,
+            nonce,
+            issued_at,
+            expiration_time,
+        }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
