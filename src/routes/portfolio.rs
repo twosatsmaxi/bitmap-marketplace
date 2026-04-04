@@ -102,48 +102,31 @@ async fn get_portfolio(
         }));
     }
 
-    // Get trait counts for all user's bitmaps
-    let trait_stats: Vec<TraitStat> = state
-        .db
-        .get_trait_counts_by_inscription_ids(&inscription_ids)
-        .await
-        .map_err(AppError::Internal)?
+    // Run trait counts, bitmap fetch, and count concurrently
+    let trait_future = state.db.get_trait_counts_by_inscription_ids(&inscription_ids);
+
+    let (bitmaps, total, trait_raw) = if let Some(ref trait_filter) = query.trait_filter {
+        let (bitmaps, count, traits) = tokio::try_join!(
+            state.db.get_bitmaps_by_inscription_ids_and_trait(&inscription_ids, trait_filter, limit, offset),
+            state.db.count_bitmaps_by_inscription_ids_and_trait(&inscription_ids, trait_filter),
+            trait_future,
+        )
+        .map_err(AppError::Internal)?;
+        (bitmaps, count, traits)
+    } else {
+        let (bitmaps, count, traits) = tokio::try_join!(
+            state.db.get_bitmaps_by_inscription_ids(&inscription_ids, limit, offset),
+            state.db.count_bitmaps_by_inscription_ids(&inscription_ids),
+            trait_future,
+        )
+        .map_err(AppError::Internal)?;
+        (bitmaps, count, traits)
+    };
+
+    let trait_stats: Vec<TraitStat> = trait_raw
         .into_iter()
         .map(|(name, count)| TraitStat { name, count })
         .collect();
-
-    // Apply trait filter if specified
-    let (bitmaps, total) = if let Some(ref trait_filter) = query.trait_filter {
-        // Get bitmaps matching the trait
-        let filtered_bitmaps = state
-            .db
-            .get_bitmaps_by_inscription_ids_and_trait(&inscription_ids, trait_filter, limit, offset)
-            .await
-            .map_err(AppError::Internal)?;
-        
-        let filtered_total = state
-            .db
-            .count_bitmaps_by_inscription_ids_and_trait(&inscription_ids, trait_filter)
-            .await
-            .map_err(AppError::Internal)?;
-        
-        (filtered_bitmaps, filtered_total)
-    } else {
-        // No filter - get all bitmaps
-        let total = state
-            .db
-            .count_bitmaps_by_inscription_ids(&inscription_ids)
-            .await
-            .map_err(AppError::Internal)?;
-        
-        let bitmaps = state
-            .db
-            .get_bitmaps_by_inscription_ids(&inscription_ids, limit, offset)
-            .await
-            .map_err(AppError::Internal)?;
-        
-        (bitmaps, total)
-    };
 
     let has_more = (offset + bitmaps.len() as i64) < total;
 
@@ -234,47 +217,31 @@ async fn get_multi_portfolio(
         }));
     }
 
-    // Get trait counts for all bitmaps across all addresses
-    let trait_stats: Vec<TraitStat> = state
-        .db
-        .get_trait_counts_by_inscription_ids(&all_inscription_ids)
-        .await
-        .map_err(AppError::Internal)?
+    // Run trait counts, bitmap fetch, and count concurrently
+    let trait_future = state.db.get_trait_counts_by_inscription_ids(&all_inscription_ids);
+
+    let (bitmaps, total, trait_raw) = if let Some(ref trait_filter) = req.trait_filter {
+        let (bitmaps, count, traits) = tokio::try_join!(
+            state.db.get_bitmaps_by_inscription_ids_and_trait(&all_inscription_ids, trait_filter, limit, offset),
+            state.db.count_bitmaps_by_inscription_ids_and_trait(&all_inscription_ids, trait_filter),
+            trait_future,
+        )
+        .map_err(AppError::Internal)?;
+        (bitmaps, count, traits)
+    } else {
+        let (bitmaps, count, traits) = tokio::try_join!(
+            state.db.get_bitmaps_by_inscription_ids(&all_inscription_ids, limit, offset),
+            state.db.count_bitmaps_by_inscription_ids(&all_inscription_ids),
+            trait_future,
+        )
+        .map_err(AppError::Internal)?;
+        (bitmaps, count, traits)
+    };
+
+    let trait_stats: Vec<TraitStat> = trait_raw
         .into_iter()
         .map(|(name, count)| TraitStat { name, count })
         .collect();
-
-    // Get bitmaps with optional trait filter
-    let (bitmaps, total) = if let Some(ref trait_filter) = req.trait_filter {
-        let filtered = state
-            .db
-            .get_bitmaps_by_inscription_ids_and_trait(
-                &all_inscription_ids,
-                trait_filter,
-                limit,
-                offset,
-            )
-            .await
-            .map_err(AppError::Internal)?;
-        let count = state
-            .db
-            .count_bitmaps_by_inscription_ids_and_trait(&all_inscription_ids, trait_filter)
-            .await
-            .map_err(AppError::Internal)?;
-        (filtered, count)
-    } else {
-        let total = state
-            .db
-            .count_bitmaps_by_inscription_ids(&all_inscription_ids)
-            .await
-            .map_err(AppError::Internal)?;
-        let bitmaps = state
-            .db
-            .get_bitmaps_by_inscription_ids(&all_inscription_ids, limit, offset)
-            .await
-            .map_err(AppError::Internal)?;
-        (bitmaps, total)
-    };
 
     let has_more = (offset + bitmaps.len() as i64) < total;
 
