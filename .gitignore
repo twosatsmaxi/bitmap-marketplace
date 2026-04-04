@@ -10,3 +10,6 @@ bitmap_backup*
 # Secrets
 .env
 .claude/worktrees
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key

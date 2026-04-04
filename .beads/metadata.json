@@ -3,5 +3,6 @@
   "backend": "dolt",
   "dolt_mode": "server",
   "dolt_server_port": 3308,
-  "dolt_database": "bitmap_marketplace"
+  "dolt_database": "bitmap_marketplace",
+  "project_id": "186c2483-2cb6-4045-bb13-7ca3fcf9caec"
 }

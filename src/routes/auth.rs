@@ -37,7 +37,7 @@ pub fn router() -> Router<AppState> {
         .route("/challenge", get(get_challenge))
         .route("/connect", post(connect_wallet))
         .route("/profile", get(get_profile))
-        .route("/wallets/{address}", delete(remove_wallet))
+        .route("/wallets/:address", delete(remove_wallet))
 }
 
 // ---------------------------------------------------------------------------
