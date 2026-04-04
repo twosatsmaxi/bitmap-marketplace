@@ -3,6 +3,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::{errors::AppError, AppState};
@@ -183,8 +184,8 @@ async fn get_multi_portfolio(
     let page = req.page;
     let offset = page as i64 * limit;
 
-    // Fetch inscription IDs for all addresses in parallel
-    let futures: Vec<_> = req
+    // Fetch inscription IDs for all addresses with bounded concurrency
+    let futs: Vec<_> = req
         .addresses
         .iter()
         .map(|addr| {
@@ -197,7 +198,10 @@ async fn get_multi_portfolio(
         })
         .collect();
 
-    let results = futures::future::join_all(futures).await;
+    let results: Vec<_> = stream::iter(futs)
+        .buffer_unordered(10)
+        .collect()
+        .await;
 
     // Build inscription_id -> owner mapping and merged list
     let mut inscription_to_owner: std::collections::HashMap<String, String> =
