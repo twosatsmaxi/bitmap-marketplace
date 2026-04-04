@@ -145,4 +145,24 @@ impl Database {
                 .await?;
         Ok(count)
     }
+
+    /// Update the label for a wallet belonging to a profile
+    /// Returns true if a row was updated, false if wallet not found for this profile
+    pub async fn update_wallet_label(
+        &self,
+        profile_id: Uuid,
+        ordinals_address: &str,
+        label: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE profile_wallets SET label = $1 WHERE profile_id = $2 AND ordinals_address = $3",
+        )
+        .bind(label)
+        .bind(profile_id)
+        .bind(ordinals_address)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }

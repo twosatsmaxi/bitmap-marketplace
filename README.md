@@ -112,6 +112,7 @@ The marketplace uses BIP-322 signature verification for wallet authentication:
 | `GET /api/auth/challenge` | No | Get authentication challenge |
 | `POST /api/auth/connect` | No | Connect wallet, get JWT |
 | `GET /api/auth/profile` | Yes | Get current profile |
+| `PATCH /api/auth/wallets/:address` | Yes | Update wallet label |
 | `DELETE /api/auth/wallets/:address` | Yes | Remove wallet |
 | `GET /api/bitmaps` | No | List bitmaps |
 | `GET /api/listings` | No | List active listings |

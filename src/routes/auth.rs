@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header::{CACHE_CONTROL, SET_COOKIE}, HeaderMap},
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use bitcoin::address::NetworkUnchecked;
@@ -37,6 +37,7 @@ pub fn router() -> Router<AppState> {
         .route("/challenge", get(get_challenge))
         .route("/connect", post(connect_wallet))
         .route("/profile", get(get_profile))
+        .route("/wallets/:address", patch(update_wallet_label))
         .route("/wallets/:address", delete(remove_wallet))
 }
 
@@ -81,6 +82,12 @@ struct ConnectRequest {
     message: String,
     nonce: String,
     label: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateWalletLabelRequest {
+    label: String,
 }
 
 #[derive(Serialize)]
@@ -406,6 +413,46 @@ async fn remove_wallet(
     Ok(Json(build_profile_response(&profile, &wallets)))
 }
 
+// ---------------------------------------------------------------------------
+// PATCH /wallets/:address
+// ---------------------------------------------------------------------------
+
+async fn update_wallet_label(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(address): Path<String>,
+    Json(body): Json<UpdateWalletLabelRequest>,
+) -> Result<Json<ProfileResponse>, AppError> {
+    let profile = authenticate(&headers, &state).await?;
+
+    // Validate the address format
+    if !validate_bitcoin_address(&address, state.allowed_address_network) {
+        return Err(AppError::BadRequest(format!(
+            "Invalid Bitcoin address: {}",
+            address
+        )));
+    }
+
+    // Validate label is not empty
+    let label = body.label.trim();
+    if label.is_empty() {
+        return Err(AppError::BadRequest("Label cannot be empty".to_string()));
+    }
+
+    // Update the wallet label
+    let updated = state
+        .db
+        .update_wallet_label(profile.id, &address, label)
+        .await?;
+
+    if !updated {
+        return Err(AppError::NotFound("Wallet not found".to_string()));
+    }
+
+    let wallets = state.db.get_profile_wallets(profile.id).await?;
+    Ok(Json(build_profile_response(&profile, &wallets)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,5 +612,23 @@ mod tests {
         assert!(cookie.contains("Path=/"), "missing Path=/");
         assert!(cookie.contains("Max-Age=2592000"), "missing Max-Age");
         assert!(cookie.starts_with("bitmap_token=fake-token;"), "wrong cookie name/value");
+    }
+
+    // -----------------------------------------------------------------------
+    // update_wallet_label request validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn update_wallet_label_request_deserializes() {
+        let json = r#"{"label":"My Updated Wallet"}"#;
+        let req: UpdateWalletLabelRequest = serde_json::from_str(json).expect("should parse");
+        assert_eq!(req.label, "My Updated Wallet");
+    }
+
+    #[test]
+    fn update_wallet_label_request_camel_case() {
+        let json = r#"{"label":"Test Label"}"#;
+        let req: UpdateWalletLabelRequest = serde_json::from_str(json).expect("should parse");
+        assert_eq!(req.label, "Test Label");
     }
 }
