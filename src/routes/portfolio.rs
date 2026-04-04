@@ -81,7 +81,7 @@ async fn get_portfolio(
 ) -> Result<Json<PortfolioResponse>, AppError> {
     let limit = query.limit.clamp(1, 50) as i64;
     let page = query.page;
-    let offset = (page * query.limit) as i64;
+    let offset = page as i64 * limit;
 
     // Fetch all inscription IDs owned by this address from Ord
     let inscription_ids = state
@@ -173,15 +173,15 @@ async fn get_multi_portfolio(
     State(state): State<AppState>,
     Json(req): Json<MultiPortfolioRequest>,
 ) -> Result<Json<MultiPortfolioResponse>, AppError> {
-    if req.addresses.is_empty() || req.addresses.len() > 10 {
+    if req.addresses.is_empty() || req.addresses.len() > 100 {
         return Err(AppError::BadRequest(
-            "addresses must contain 1-10 items".into(),
+            "addresses must contain 1-100 items".into(),
         ));
     }
 
     let limit = req.limit.clamp(1, 50) as i64;
     let page = req.page;
-    let offset = (page * req.limit) as i64;
+    let offset = page as i64 * limit;
 
     // Fetch inscription IDs for all addresses in parallel
     let futures: Vec<_> = req
@@ -214,7 +214,7 @@ async fn get_multi_portfolio(
         }
     }
 
-    const MAX_INSCRIPTION_IDS: usize = 5000;
+    const MAX_INSCRIPTION_IDS: usize = 50_000;
     if all_inscription_ids.len() > MAX_INSCRIPTION_IDS {
         all_inscription_ids.truncate(MAX_INSCRIPTION_IDS);
     }
