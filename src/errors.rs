@@ -89,4 +89,39 @@ mod tests {
         assert!(body.contains("Internal server error"));
         assert!(!body.contains("sensitive detail"));
     }
+
+    #[tokio::test]
+    async fn not_found_returns_404() {
+        let response = AppError::NotFound("missing item".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = body_string(response.into_body()).await;
+        assert!(body.contains("missing item"));
+    }
+
+    #[tokio::test]
+    async fn bad_request_returns_400() {
+        let response = AppError::BadRequest("bad input".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_string(response.into_body()).await;
+        assert!(body.contains("bad input"));
+    }
+
+    #[tokio::test]
+    async fn conflict_returns_409() {
+        let response = AppError::Conflict("duplicate".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = body_string(response.into_body()).await;
+        assert!(body.contains("duplicate"));
+    }
+
+    #[tokio::test]
+    async fn database_error_hides_details() {
+        // Construct a sqlx error by using ColumnNotFound (doesn't need a DB connection)
+        let sqlx_err = sqlx::Error::ColumnNotFound("secret_column".to_string());
+        let response = AppError::Database(sqlx_err).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_string(response.into_body()).await;
+        assert!(body.contains("Database error"));
+        assert!(!body.contains("secret_column"));
+    }
 }

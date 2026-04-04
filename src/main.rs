@@ -269,3 +269,81 @@ fn build_cors_layer(frontend_url: Option<&str>) -> CorsLayer {
     
     cors
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::get;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn test_app(cors: CorsLayer) -> Router {
+        Router::new()
+            .route("/ping", get(|| async { "pong" }))
+            .layer(cors)
+    }
+
+    #[tokio::test]
+    async fn cors_any_origin_when_no_frontend_url() {
+        let cors = build_cors_layer(None);
+        let app = test_app(cors);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header("Origin", "http://evil.com")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let origin = resp.headers().get("access-control-allow-origin").unwrap();
+        assert_eq!(origin, "*");
+    }
+
+    #[tokio::test]
+    async fn cors_restricted_to_frontend_url() {
+        let cors = build_cors_layer(Some("http://localhost:3001"));
+        let app = test_app(cors);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header("Origin", "http://localhost:3001")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let origin = resp.headers().get("access-control-allow-origin").unwrap();
+        assert_eq!(origin, "http://localhost:3001");
+    }
+
+    #[tokio::test]
+    async fn cors_falls_back_on_invalid_frontend_url() {
+        // A header value can't contain newlines — this should trigger the fallback
+        let cors = build_cors_layer(Some("http://bad\norigin"));
+        let app = test_app(cors);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header("Origin", "http://anything.com")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let origin = resp.headers().get("access-control-allow-origin").unwrap();
+        assert_eq!(origin, "*");
+    }
+}

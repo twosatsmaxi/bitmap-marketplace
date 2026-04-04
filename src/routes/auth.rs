@@ -405,3 +405,165 @@ async fn remove_wallet(
     let wallets = state.db.get_profile_wallets(profile.id).await?;
     Ok(Json(build_profile_response(&profile, &wallets)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    // -----------------------------------------------------------------------
+    // validate_bitcoin_address
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn valid_mainnet_bech32_address() {
+        // P2WPKH mainnet address
+        assert!(validate_bitcoin_address(
+            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+            Network::Bitcoin
+        ));
+    }
+
+    #[test]
+    fn valid_mainnet_taproot_address() {
+        assert!(validate_bitcoin_address(
+            "bc1pg9hmzwhpveyz4r0x7gn3farvz4hnuf9s2h26lpuefdr40fcgfdlqcpfu6p",
+            Network::Bitcoin
+        ));
+    }
+
+    #[test]
+    fn testnet_address_rejected_on_mainnet() {
+        // tb1 prefix = testnet
+        assert!(!validate_bitcoin_address(
+            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+            Network::Bitcoin
+        ));
+    }
+
+    #[test]
+    fn garbage_input_rejected() {
+        assert!(!validate_bitcoin_address("not-an-address", Network::Bitcoin));
+        assert!(!validate_bitcoin_address("", Network::Bitcoin));
+        assert!(!validate_bitcoin_address("bc1", Network::Bitcoin));
+    }
+
+    #[test]
+    fn testnet_address_accepted_on_testnet() {
+        assert!(validate_bitcoin_address(
+            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+            Network::Testnet
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_token
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_token_from_bearer_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer my-jwt-token".parse().unwrap());
+        assert_eq!(extract_token(&headers), Some("my-jwt-token".to_string()));
+    }
+
+    #[test]
+    fn extract_token_from_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Cookie", "bitmap_token=cookie-jwt; other=val".parse().unwrap());
+        assert_eq!(extract_token(&headers), Some("cookie-jwt".to_string()));
+    }
+
+    #[test]
+    fn bearer_takes_precedence_over_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer bearer-jwt".parse().unwrap());
+        headers.insert("Cookie", "bitmap_token=cookie-jwt".parse().unwrap());
+        assert_eq!(extract_token(&headers), Some("bearer-jwt".to_string()));
+    }
+
+    #[test]
+    fn extract_token_returns_none_when_missing() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_token(&headers), None);
+    }
+
+    #[test]
+    fn non_bearer_auth_scheme_ignored() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Basic dXNlcjpwYXNz".parse().unwrap());
+        assert_eq!(extract_token(&headers), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // build_profile_response
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_profile_response_maps_fields() {
+        let now = chrono::Utc::now();
+        let profile = Profile {
+            id: uuid::Uuid::new_v4(),
+            primary_address: "bc1qtest".to_string(),
+            token_version: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        let wallets = vec![ProfileWallet {
+            id: uuid::Uuid::new_v4(),
+            profile_id: profile.id,
+            payment_address: "bc1qpay".to_string(),
+            ordinals_address: "bc1qord".to_string(),
+            label: "Wallet 1".to_string(),
+            linked_at: now,
+        }];
+
+        let resp = build_profile_response(&profile, &wallets);
+        assert_eq!(resp.id, profile.id.to_string());
+        assert_eq!(resp.primary_address, "bc1qtest");
+        assert_eq!(resp.wallets.len(), 1);
+        assert_eq!(resp.wallets[0].payment_address, "bc1qpay");
+        assert_eq!(resp.wallets[0].ordinals_address, "bc1qord");
+        assert_eq!(resp.wallets[0].label, "Wallet 1");
+    }
+
+    // -----------------------------------------------------------------------
+    // auth_response_with_cookie
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cookie_has_security_attributes() {
+        let now = chrono::Utc::now();
+        let profile = Profile {
+            id: uuid::Uuid::new_v4(),
+            primary_address: "bc1q".to_string(),
+            token_version: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        let resp = AuthResponse {
+            token: "fake-token".to_string(),
+            profile: ProfileResponse {
+                id: profile.id.to_string(),
+                primary_address: profile.primary_address.clone(),
+                wallets: vec![],
+                created_at: now.to_rfc3339(),
+            },
+        };
+
+        let response = auth_response_with_cookie(resp, "fake-token").into_response();
+        let cookie = response
+            .headers()
+            .get(SET_COOKIE)
+            .expect("Set-Cookie header missing")
+            .to_str()
+            .unwrap();
+
+        assert!(cookie.contains("HttpOnly"), "missing HttpOnly");
+        assert!(cookie.contains("Secure"), "missing Secure");
+        assert!(cookie.contains("SameSite=Strict"), "missing SameSite=Strict");
+        assert!(cookie.contains("Path=/"), "missing Path=/");
+        assert!(cookie.contains("Max-Age=2592000"), "missing Max-Age");
+        assert!(cookie.starts_with("bitmap_token=fake-token;"), "wrong cookie name/value");
+    }
+}
