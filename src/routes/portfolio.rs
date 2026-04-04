@@ -106,22 +106,19 @@ async fn get_portfolio(
     let trait_future = state.db.get_trait_counts_by_inscription_ids(&inscription_ids);
 
     let (bitmaps, total, trait_raw) = if let Some(ref trait_filter) = query.trait_filter {
-        let (bitmaps, count, traits) = tokio::try_join!(
+        tokio::try_join!(
             state.db.get_bitmaps_by_inscription_ids_and_trait(&inscription_ids, trait_filter, limit, offset),
             state.db.count_bitmaps_by_inscription_ids_and_trait(&inscription_ids, trait_filter),
             trait_future,
         )
-        .map_err(AppError::Internal)?;
-        (bitmaps, count, traits)
     } else {
-        let (bitmaps, count, traits) = tokio::try_join!(
+        tokio::try_join!(
             state.db.get_bitmaps_by_inscription_ids(&inscription_ids, limit, offset),
             state.db.count_bitmaps_by_inscription_ids(&inscription_ids),
             trait_future,
         )
-        .map_err(AppError::Internal)?;
-        (bitmaps, count, traits)
-    };
+    }
+    .map_err(AppError::Internal)?;
 
     let trait_stats: Vec<TraitStat> = trait_raw
         .into_iter()
@@ -186,24 +183,23 @@ async fn get_multi_portfolio(
         .collect()
         .await;
 
-    // Build inscription_id -> owner mapping and merged list
+    // Build inscription_id -> owner mapping and merged list (capped at 50k)
+    const MAX_INSCRIPTION_IDS: usize = 50_000;
     let mut inscription_to_owner: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut all_inscription_ids: Vec<String> = Vec::new();
 
-    for result in results {
+    'outer: for result in results {
         let (addr, ids) = result.map_err(AppError::Internal)?;
         for id in ids {
+            if all_inscription_ids.len() >= MAX_INSCRIPTION_IDS {
+                break 'outer;
+            }
             if !inscription_to_owner.contains_key(&id) {
                 inscription_to_owner.insert(id.clone(), addr.clone());
                 all_inscription_ids.push(id);
             }
         }
-    }
-
-    const MAX_INSCRIPTION_IDS: usize = 50_000;
-    if all_inscription_ids.len() > MAX_INSCRIPTION_IDS {
-        all_inscription_ids.truncate(MAX_INSCRIPTION_IDS);
     }
 
     if all_inscription_ids.is_empty() {
@@ -221,22 +217,19 @@ async fn get_multi_portfolio(
     let trait_future = state.db.get_trait_counts_by_inscription_ids(&all_inscription_ids);
 
     let (bitmaps, total, trait_raw) = if let Some(ref trait_filter) = req.trait_filter {
-        let (bitmaps, count, traits) = tokio::try_join!(
+        tokio::try_join!(
             state.db.get_bitmaps_by_inscription_ids_and_trait(&all_inscription_ids, trait_filter, limit, offset),
             state.db.count_bitmaps_by_inscription_ids_and_trait(&all_inscription_ids, trait_filter),
             trait_future,
         )
-        .map_err(AppError::Internal)?;
-        (bitmaps, count, traits)
     } else {
-        let (bitmaps, count, traits) = tokio::try_join!(
+        tokio::try_join!(
             state.db.get_bitmaps_by_inscription_ids(&all_inscription_ids, limit, offset),
             state.db.count_bitmaps_by_inscription_ids(&all_inscription_ids),
             trait_future,
         )
-        .map_err(AppError::Internal)?;
-        (bitmaps, count, traits)
-    };
+    }
+    .map_err(AppError::Internal)?;
 
     let trait_stats: Vec<TraitStat> = trait_raw
         .into_iter()
