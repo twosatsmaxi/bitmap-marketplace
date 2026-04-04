@@ -134,8 +134,7 @@ pub async fn get_explore_blocks(
 ) -> Result<Json<ExploreResponse>, AppError> {
     let limit = query.limit.clamp(1, 50) as i64;
     let page = query.page;
-    let offset = page * query.limit;
-    let offset_i64 = offset as i64;
+    let offset_i64 = page as i64 * limit;
 
     let has_prev = page > 0;
 
@@ -160,7 +159,7 @@ pub async fn get_explore_blocks(
         .map_err(AppError::Internal)?;
 
     let heights: Vec<u64> = heights_i64.into_iter().map(|h| h as u64).collect();
-    let has_more = offset + (heights.len() as u64) < (total as u64);
+    let has_more = (offset_i64 + heights.len() as i64) < total;
 
     Ok(Json(ExploreResponse {
         heights,
