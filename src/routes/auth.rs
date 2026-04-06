@@ -142,7 +142,7 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Authenticate a request: extract token, verify JWT, load profile, check token_version.
-async fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<Profile, AppError> {
+pub async fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<Profile, AppError> {
     let token_str = extract_token(headers)
         .ok_or_else(|| AppError::Unauthorized("Missing authorization token".to_string()))?;
 
