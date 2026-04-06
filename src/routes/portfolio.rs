@@ -17,10 +17,7 @@ use crate::{errors::AppError, routes::auth, AppState};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/mine", get(get_my_portfolio))
-        .route(
-            "/profile/:profile_id",
-            get(get_portfolio_by_profile_id).head(head_portfolio_addresses),
-        )
+        .route("/profile/:profile_id", get(get_portfolio_by_profile_id))
         .route("/:address", get(get_portfolio))
 }
 
@@ -41,17 +38,6 @@ fn profile_etag(address_counts: &[(String, u64)]) -> String {
     format!("W/\"{:016x}\"", h.finish())
 }
 
-/// Cheap addresses-only ETag used by HEAD /profile/:id.
-/// Does not include counts — stays DB-only.
-fn head_etag(addresses: &[String]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut sorted = addresses.to_vec();
-    sorted.sort_unstable();
-    let mut h = DefaultHasher::new();
-    sorted.hash(&mut h);
-    format!("W/\"{:016x}\"", h.finish())
-}
 
 /// Returns true if the request's If-None-Match header matches the given ETag.
 fn etag_matches(req_headers: &HeaderMap, etag: &str) -> bool {
@@ -343,54 +329,6 @@ async fn get_portfolio_by_profile_id(
         }),
     )
         .into_response())
-}
-
-/// HEAD /api/portfolio/profile/:profile_id — cheap staleness probe; addresses-only ETag
-async fn head_portfolio_addresses(
-    State(state): State<AppState>,
-    req_headers: HeaderMap,
-    Path(profile_id): Path<Uuid>,
-) -> Result<impl IntoResponse, AppError> {
-    state
-        .db
-        .get_profile_by_id(profile_id)
-        .await
-        .map_err(AppError::Internal)?
-        .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
-
-    let addresses = state
-        .db
-        .get_all_ordinals_addresses(profile_id)
-        .await
-        .map_err(AppError::Internal)?;
-
-    let etag = head_etag(&addresses);
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=60, s-maxage=300"),
-    );
-    headers.insert(
-        ETAG,
-        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
-    );
-    headers.insert(
-        "X-Portfolio-Addresses",
-        HeaderValue::from_str(&addresses.join(","))
-            .unwrap_or_else(|_| HeaderValue::from_static("")),
-    );
-    headers.insert(
-        "X-Portfolio-Count",
-        HeaderValue::from_str(&addresses.len().to_string())
-            .unwrap_or_else(|_| HeaderValue::from_static("0")),
-    );
-
-    if etag_matches(&req_headers, &etag) {
-        return Ok((StatusCode::NOT_MODIFIED, headers));
-    }
-
-    Ok((StatusCode::OK, headers))
 }
 
 // ---------------------------------------------------------------------------
