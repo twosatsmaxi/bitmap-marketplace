@@ -162,11 +162,11 @@ async fn main() -> Result<()> {
     // Uses PeerIpKeyExtractor (TCP peer address) — correct for direct deployments with no
     // reverse proxy. If deployed behind a load balancer/proxy later, switch to
     // SmartIpKeyExtractor and configure trusted proxy allowlisting to prevent header spoofing.
-    // 30-burst / 10s-refill: generous for legitimate marketplace users, strict for scrapers.
+    // 300-burst / 100s-refill: generous for legitimate marketplace users with batch-heavy frontends.
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(10)
-            .burst_size(30)
+            .per_second(100)
+            .burst_size(300)
             .finish()
             .unwrap(),
     );
