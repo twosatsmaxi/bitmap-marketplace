@@ -1,6 +1,7 @@
 use axum::{
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
     routing::get,
     Json, Router,
 };
@@ -13,7 +14,10 @@ use crate::{errors::AppError, routes::auth, AppState};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/mine", get(get_my_portfolio))
-        .route("/profile/:profile_id", get(get_portfolio_by_profile_id))
+        .route(
+            "/profile/:profile_id",
+            get(get_portfolio_by_profile_id).head(head_portfolio_addresses),
+        )
         .route("/:address", get(get_portfolio))
 }
 
@@ -230,6 +234,39 @@ async fn get_portfolio_by_profile_id(
         page,
         has_more,
     }))
+}
+
+/// HEAD /api/portfolio/profile/:profile_id — returns all ordinals addresses in X-Portfolio-Addresses header
+async fn head_portfolio_addresses(
+    State(state): State<AppState>,
+    Path(profile_id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    state
+        .db
+        .get_profile_by_id(profile_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
+
+    let addresses = state
+        .db
+        .get_all_ordinals_addresses(profile_id)
+        .await
+        .map_err(AppError::Internal)?;
+
+    let header_val = addresses.join(",");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "X-Portfolio-Addresses",
+        HeaderValue::from_str(&header_val)
+            .unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+    headers.insert(
+        "X-Portfolio-Count",
+        HeaderValue::from_str(&addresses.len().to_string())
+            .unwrap_or_else(|_| HeaderValue::from_static("0")),
+    );
+    Ok((StatusCode::OK, headers))
 }
 
 /// Shared logic: fetch inscription IDs for all addresses, then query bitmaps + traits.
