@@ -25,6 +25,9 @@ pub fn router() -> Router<AppState> {
 // ETag helpers
 // ---------------------------------------------------------------------------
 
+const CACHE_PRIVATE: &str = "private, max-age=600";
+const CACHE_PUBLIC: &str = "public, max-age=60, s-maxage=300, stale-while-revalidate=60";
+
 /// Generates a weak ETag from (address, outputs_count) pairs.
 /// Sorted by address for stability. Busts when wallets are added/removed
 /// OR when outputs (inscriptions) are added/removed from any wallet.
@@ -38,7 +41,6 @@ fn profile_etag(address_counts: &[(String, u64)]) -> String {
     format!("W/\"{:016x}\"", h.finish())
 }
 
-
 /// Returns true if the request's If-None-Match header matches the given ETag.
 fn etag_matches(req_headers: &HeaderMap, etag: &str) -> bool {
     req_headers
@@ -48,15 +50,20 @@ fn etag_matches(req_headers: &HeaderMap, etag: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Builds a 304 Not Modified response with ETag + Cache-Control headers.
-fn not_modified(etag: &str, cache_control: &'static str) -> Response {
+/// Builds ETag + Cache-Control headers for a response.
+fn cache_headers(etag: &str, cache_control: &'static str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         ETAG,
         HeaderValue::from_str(etag).unwrap_or_else(|_| HeaderValue::from_static("")),
     );
     headers.insert(CACHE_CONTROL, HeaderValue::from_static(cache_control));
-    (StatusCode::NOT_MODIFIED, headers).into_response()
+    headers
+}
+
+/// Builds a 304 Not Modified response with ETag + Cache-Control headers.
+fn not_modified(etag: &str, cache_control: &'static str) -> Response {
+    (StatusCode::NOT_MODIFIED, cache_headers(etag, cache_control)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +223,7 @@ async fn get_my_portfolio(
     let etag = profile_etag(&address_counts);
 
     if etag_matches(&headers, &etag) {
-        return Ok(not_modified(&etag, "private, max-age=600"));
+        return Ok(not_modified(&etag, CACHE_PRIVATE));
     }
 
     let wallet_entries: Vec<WalletEntry> = wallets
@@ -236,15 +243,8 @@ async fn get_my_portfolio(
     )
     .await?;
 
-    let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, max-age=600"));
-    resp_headers.insert(
-        ETAG,
-        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
-    );
-
     Ok((
-        resp_headers,
+        cache_headers(&etag, CACHE_PRIVATE),
         Json(ProfilePortfolioResponse {
             profile_id: profile.id.to_string(),
             addresses: wallet_entries,
@@ -283,10 +283,7 @@ async fn get_portfolio_by_profile_id(
     let etag = profile_etag(&address_counts);
 
     if etag_matches(&headers, &etag) {
-        return Ok(not_modified(
-            &etag,
-            "public, max-age=60, s-maxage=300, stale-while-revalidate=60",
-        ));
+        return Ok(not_modified(&etag, CACHE_PUBLIC));
     }
 
     let wallet_entries: Vec<WalletEntry> = wallets
@@ -306,18 +303,8 @@ async fn get_portfolio_by_profile_id(
     )
     .await?;
 
-    let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=60, s-maxage=300, stale-while-revalidate=60"),
-    );
-    resp_headers.insert(
-        ETAG,
-        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
-    );
-
     Ok((
-        resp_headers,
+        cache_headers(&etag, CACHE_PUBLIC),
         Json(ProfilePortfolioResponse {
             profile_id: profile_id.to_string(),
             addresses: wallet_entries,
