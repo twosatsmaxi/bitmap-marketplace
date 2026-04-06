@@ -25,19 +25,25 @@ pub fn router() -> Router<AppState> {
 // ETag helpers
 // ---------------------------------------------------------------------------
 
-/// Generates a weak ETag from (address, outputs_count) pairs.
-/// Sorted by address for stability. Busts when wallets are added/removed
-/// OR when outputs (inscriptions) are added/removed from any wallet.
-fn profile_etag(address_counts: &[(String, u64)]) -> String {
+const CACHE_PRIVATE: &str = "private, max-age=600";
+const CACHE_PUBLIC: &str = "public, max-age=60, s-maxage=300, stale-while-revalidate=60";
+
+/// Generates a weak ETag from (address, outputs_count) pairs plus query params.
+/// Sorted by address for stability. Busts when wallets are added/removed,
+/// when outputs change, or when the query view changes (wallet/trait/page/limit).
+fn profile_etag(address_counts: &[(String, u64)], query: &PortfolioQuery) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut sorted = address_counts.to_vec();
     sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     let mut h = DefaultHasher::new();
     sorted.hash(&mut h);
+    query.page.hash(&mut h);
+    query.limit.hash(&mut h);
+    query.trait_filter.hash(&mut h);
+    query.wallet.hash(&mut h);
     format!("W/\"{:016x}\"", h.finish())
 }
-
 
 /// Returns true if the request's If-None-Match header matches the given ETag.
 fn etag_matches(req_headers: &HeaderMap, etag: &str) -> bool {
@@ -48,15 +54,20 @@ fn etag_matches(req_headers: &HeaderMap, etag: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Builds a 304 Not Modified response with ETag + Cache-Control headers.
-fn not_modified(etag: &str, cache_control: &'static str) -> Response {
+/// Builds ETag + Cache-Control headers for a response.
+fn cache_headers(etag: &str, cache_control: &'static str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         ETAG,
         HeaderValue::from_str(etag).unwrap_or_else(|_| HeaderValue::from_static("")),
     );
     headers.insert(CACHE_CONTROL, HeaderValue::from_static(cache_control));
-    (StatusCode::NOT_MODIFIED, headers).into_response()
+    headers
+}
+
+/// Builds a 304 Not Modified response with ETag + Cache-Control headers.
+fn not_modified(etag: &str, cache_control: &'static str) -> Response {
+    (StatusCode::NOT_MODIFIED, cache_headers(etag, cache_control)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +82,8 @@ pub struct PortfolioQuery {
     pub limit: u64,
     /// Filter by trait (optional)
     pub trait_filter: Option<String>,
+    /// Filter by wallet address (optional)
+    pub wallet: Option<String>,
 }
 
 fn default_limit() -> u64 {
@@ -213,10 +226,10 @@ async fn get_my_portfolio(
 
     let addresses: Vec<String> = wallets.iter().map(|w| w.ordinals_address.clone()).collect();
     let address_counts = fetch_address_counts(&state, &addresses).await?;
-    let etag = profile_etag(&address_counts);
+    let etag = profile_etag(&address_counts, &query);
 
     if etag_matches(&headers, &etag) {
-        return Ok(not_modified(&etag, "private, max-age=600"));
+        return Ok(not_modified(&etag, CACHE_PRIVATE));
     }
 
     let wallet_entries: Vec<WalletEntry> = wallets
@@ -233,18 +246,12 @@ async fn get_my_portfolio(
         query.page,
         query.limit,
         query.trait_filter.as_deref(),
+        query.wallet.as_deref(),
     )
     .await?;
 
-    let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, max-age=600"));
-    resp_headers.insert(
-        ETAG,
-        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
-    );
-
     Ok((
-        resp_headers,
+        cache_headers(&etag, CACHE_PRIVATE),
         Json(ProfilePortfolioResponse {
             profile_id: profile.id.to_string(),
             addresses: wallet_entries,
@@ -280,13 +287,10 @@ async fn get_portfolio_by_profile_id(
 
     let addresses: Vec<String> = wallets.iter().map(|w| w.ordinals_address.clone()).collect();
     let address_counts = fetch_address_counts(&state, &addresses).await?;
-    let etag = profile_etag(&address_counts);
+    let etag = profile_etag(&address_counts, &query);
 
     if etag_matches(&headers, &etag) {
-        return Ok(not_modified(
-            &etag,
-            "public, max-age=60, s-maxage=300, stale-while-revalidate=60",
-        ));
+        return Ok(not_modified(&etag, CACHE_PUBLIC));
     }
 
     let wallet_entries: Vec<WalletEntry> = wallets
@@ -303,21 +307,12 @@ async fn get_portfolio_by_profile_id(
         query.page,
         query.limit,
         query.trait_filter.as_deref(),
+        query.wallet.as_deref(),
     )
     .await?;
 
-    let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=60, s-maxage=300, stale-while-revalidate=60"),
-    );
-    resp_headers.insert(
-        ETAG,
-        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
-    );
-
     Ok((
-        resp_headers,
+        cache_headers(&etag, CACHE_PUBLIC),
         Json(ProfilePortfolioResponse {
             profile_id: profile_id.to_string(),
             addresses: wallet_entries,
@@ -370,6 +365,7 @@ async fn run_multi_portfolio(
     page: u64,
     limit: u64,
     trait_filter: Option<&str>,
+    wallet_filter: Option<&str>,
 ) -> Result<(Vec<PortfolioBitmapItem>, Vec<TraitStat>, i64, u64, bool), AppError> {
     if addresses.is_empty() {
         return Ok((vec![], vec![], 0, page, false));
@@ -411,6 +407,13 @@ async fn run_multi_portfolio(
                 all_inscription_ids.push(id);
             }
         }
+    }
+
+    // Filter to a single wallet if requested
+    if let Some(wallet) = wallet_filter {
+        all_inscription_ids.retain(|id| {
+            inscription_to_owner.get(id).map(|o| o == wallet).unwrap_or(false)
+        });
     }
 
     if all_inscription_ids.is_empty() {

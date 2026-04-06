@@ -284,7 +284,11 @@ async fn shutdown_signal() {
 fn build_cors_layer(frontend_url: Option<&str>) -> CorsLayer {
     let mut cors = CorsLayer::new()
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .expose_headers([
+            axum::http::header::ETAG,
+            axum::http::header::CACHE_CONTROL,
+        ]);
     
     if let Some(origin) = frontend_url {
         // Production: restrict to specific frontend origin
