@@ -28,16 +28,20 @@ pub fn router() -> Router<AppState> {
 const CACHE_PRIVATE: &str = "private, max-age=600";
 const CACHE_PUBLIC: &str = "public, max-age=60, s-maxage=300, stale-while-revalidate=60";
 
-/// Generates a weak ETag from (address, outputs_count) pairs.
-/// Sorted by address for stability. Busts when wallets are added/removed
-/// OR when outputs (inscriptions) are added/removed from any wallet.
-fn profile_etag(address_counts: &[(String, u64)]) -> String {
+/// Generates a weak ETag from (address, outputs_count) pairs plus query params.
+/// Sorted by address for stability. Busts when wallets are added/removed,
+/// when outputs change, or when the query view changes (wallet/trait/page/limit).
+fn profile_etag(address_counts: &[(String, u64)], query: &PortfolioQuery) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut sorted = address_counts.to_vec();
     sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     let mut h = DefaultHasher::new();
     sorted.hash(&mut h);
+    query.page.hash(&mut h);
+    query.limit.hash(&mut h);
+    query.trait_filter.hash(&mut h);
+    query.wallet.hash(&mut h);
     format!("W/\"{:016x}\"", h.finish())
 }
 
@@ -78,6 +82,8 @@ pub struct PortfolioQuery {
     pub limit: u64,
     /// Filter by trait (optional)
     pub trait_filter: Option<String>,
+    /// Filter by wallet address (optional)
+    pub wallet: Option<String>,
 }
 
 fn default_limit() -> u64 {
@@ -220,7 +226,7 @@ async fn get_my_portfolio(
 
     let addresses: Vec<String> = wallets.iter().map(|w| w.ordinals_address.clone()).collect();
     let address_counts = fetch_address_counts(&state, &addresses).await?;
-    let etag = profile_etag(&address_counts);
+    let etag = profile_etag(&address_counts, &query);
 
     if etag_matches(&headers, &etag) {
         return Ok(not_modified(&etag, CACHE_PRIVATE));
@@ -240,6 +246,7 @@ async fn get_my_portfolio(
         query.page,
         query.limit,
         query.trait_filter.as_deref(),
+        query.wallet.as_deref(),
     )
     .await?;
 
@@ -280,7 +287,7 @@ async fn get_portfolio_by_profile_id(
 
     let addresses: Vec<String> = wallets.iter().map(|w| w.ordinals_address.clone()).collect();
     let address_counts = fetch_address_counts(&state, &addresses).await?;
-    let etag = profile_etag(&address_counts);
+    let etag = profile_etag(&address_counts, &query);
 
     if etag_matches(&headers, &etag) {
         return Ok(not_modified(&etag, CACHE_PUBLIC));
@@ -300,6 +307,7 @@ async fn get_portfolio_by_profile_id(
         query.page,
         query.limit,
         query.trait_filter.as_deref(),
+        query.wallet.as_deref(),
     )
     .await?;
 
@@ -357,6 +365,7 @@ async fn run_multi_portfolio(
     page: u64,
     limit: u64,
     trait_filter: Option<&str>,
+    wallet_filter: Option<&str>,
 ) -> Result<(Vec<PortfolioBitmapItem>, Vec<TraitStat>, i64, u64, bool), AppError> {
     if addresses.is_empty() {
         return Ok((vec![], vec![], 0, page, false));
@@ -398,6 +407,13 @@ async fn run_multi_portfolio(
                 all_inscription_ids.push(id);
             }
         }
+    }
+
+    // Filter to a single wallet if requested
+    if let Some(wallet) = wallet_filter {
+        all_inscription_ids.retain(|id| {
+            inscription_to_owner.get(id).map(|o| o == wallet).unwrap_or(false)
+        });
     }
 
     if all_inscription_ids.is_empty() {
