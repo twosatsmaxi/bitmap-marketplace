@@ -1,4 +1,5 @@
 use anyhow::Result;
+use axum::http::StatusCode;
 use axum::Router;
 use bitcoin::Network;
 use std::net::SocketAddr;
@@ -12,7 +13,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{self, TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod db;
@@ -208,7 +209,18 @@ async fn main() -> Result<()> {
         .nest("/api", api_router)
         .merge(ws_router)
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .on_response(
+                    trace::DefaultOnResponse::new()
+                        .level(tracing::Level::DEBUG),
+                )
+                .on_request(
+                    trace::DefaultOnRequest::new()
+                        .level(tracing::Level::DEBUG),
+                ),
+        )
+        .layer(axum::middleware::from_fn(log_rate_limited))
         .layer(build_cors_layer(frontend_url.as_deref()))
         .with_state(state);
 
@@ -231,6 +243,32 @@ async fn main() -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+async fn log_rate_limited(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.to_string())
+        .unwrap_or_else(|| "unknown".into());
+
+    let response = next.run(req).await;
+
+    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        tracing::warn!(
+            peer = %peer,
+            method = %method,
+            uri = %uri,
+            "rate limited (429)"
+        );
+    }
+
+    response
 }
 
 async fn shutdown_signal() {

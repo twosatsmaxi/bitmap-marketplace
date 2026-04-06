@@ -272,7 +272,7 @@ async fn proxy_batch_block_meta(
 
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
-    headers.insert("cache-control", "public, max-age=60".parse().unwrap());
+    headers.insert("cache-control", "public, max-age=604800".parse().unwrap());
 
     Ok((StatusCode::OK, headers, Body::from(bytes)).into_response())
 }
@@ -304,7 +304,7 @@ async fn proxy_block_meta(
 
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
-    headers.insert("cache-control", "public, max-age=60".parse().unwrap());
+    headers.insert("cache-control", "public, max-age=604800".parse().unwrap());
 
     Ok((StatusCode::OK, headers, Body::from(bytes)).into_response())
 }
