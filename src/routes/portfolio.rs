@@ -1,7 +1,10 @@
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
+    http::{
+        header::{CACHE_CONTROL, ETAG, IF_NONE_MATCH},
+        HeaderMap, HeaderValue, StatusCode,
+    },
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -20,6 +23,48 @@ pub fn router() -> Router<AppState> {
         )
         .route("/:address", get(get_portfolio))
 }
+
+// ---------------------------------------------------------------------------
+// ETag helpers
+// ---------------------------------------------------------------------------
+
+/// Generates a weak ETag from the sorted set of ordinals addresses.
+/// Consistent between HEAD and GET — cheap (DB-only, no ord fetch).
+/// Busts when wallets are added or removed. New inscriptions in existing
+/// wallets are bounded by Cache-Control max-age instead.
+fn profile_etag(addresses: &[String]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut sorted = addresses.to_vec();
+    sorted.sort_unstable();
+    let mut h = DefaultHasher::new();
+    sorted.hash(&mut h);
+    format!("W/\"{:016x}\"", h.finish())
+}
+
+/// Returns true if the request's If-None-Match header matches the given ETag.
+fn etag_matches(req_headers: &HeaderMap, etag: &str) -> bool {
+    req_headers
+        .get(IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == etag || v == "*")
+        .unwrap_or(false)
+}
+
+/// Builds a 304 Not Modified response with ETag + Cache-Control headers.
+fn not_modified(etag: &str, cache_control: &'static str) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        ETAG,
+        HeaderValue::from_str(etag).unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static(cache_control));
+    (StatusCode::NOT_MODIFIED, headers).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Request / Response types
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 pub struct PortfolioQuery {
@@ -79,6 +124,10 @@ pub struct ProfilePortfolioResponse {
     pub has_more: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
 async fn get_portfolio(
     State(state): State<AppState>,
     Path(address): Path<String>,
@@ -88,7 +137,6 @@ async fn get_portfolio(
     let page = query.page;
     let offset = page as i64 * limit;
 
-    // Fetch all inscription IDs owned by this address from Ord
     let inscription_ids = state
         .ord_client
         .get_address_inscription_ids(&address)
@@ -106,7 +154,6 @@ async fn get_portfolio(
         }));
     }
 
-    // Run trait counts, bitmap fetch, and count concurrently
     let trait_future = state.db.get_trait_counts_by_inscription_ids(&inscription_ids);
 
     let (bitmaps, total, trait_raw) = if let Some(ref trait_filter) = query.trait_filter {
@@ -154,16 +201,26 @@ async fn get_portfolio(
     }))
 }
 
-/// GET /api/portfolio/mine — authenticated; returns aggregated portfolio for all linked wallets
+/// GET /api/portfolio/mine — authenticated; private cache (10 min) + ETag revalidation
 async fn get_my_portfolio(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<PortfolioQuery>,
-) -> Result<Json<ProfilePortfolioResponse>, AppError> {
+) -> Result<Response, AppError> {
     let profile = auth::authenticate(&headers, &state).await?;
-    let wallets = state.db.get_profile_wallets(profile.id).await.map_err(AppError::Internal)?;
+    let wallets = state
+        .db
+        .get_profile_wallets(profile.id)
+        .await
+        .map_err(AppError::Internal)?;
 
     let addresses: Vec<String> = wallets.iter().map(|w| w.ordinals_address.clone()).collect();
+    let etag = profile_etag(&addresses);
+
+    if etag_matches(&headers, &etag) {
+        return Ok(not_modified(&etag, "private, max-age=600"));
+    }
+
     let wallet_entries: Vec<WalletEntry> = wallets
         .iter()
         .map(|w| WalletEntry {
@@ -181,23 +238,35 @@ async fn get_my_portfolio(
     )
     .await?;
 
-    Ok(Json(ProfilePortfolioResponse {
-        profile_id: profile.id.to_string(),
-        addresses: wallet_entries,
-        bitmaps,
-        traits,
-        total,
-        page,
-        has_more,
-    }))
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, max-age=600"));
+    resp_headers.insert(
+        ETAG,
+        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+
+    Ok((
+        resp_headers,
+        Json(ProfilePortfolioResponse {
+            profile_id: profile.id.to_string(),
+            addresses: wallet_entries,
+            bitmaps,
+            traits,
+            total,
+            page,
+            has_more,
+        }),
+    )
+        .into_response())
 }
 
-/// GET /api/portfolio/profile/:profile_id — public; anyone can view an aggregated portfolio by profile ID
+/// GET /api/portfolio/profile/:profile_id — public; edge-cacheable with ETag revalidation
 async fn get_portfolio_by_profile_id(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(profile_id): Path<Uuid>,
     Query(query): Query<PortfolioQuery>,
-) -> Result<Json<ProfilePortfolioResponse>, AppError> {
+) -> Result<Response, AppError> {
     state
         .db
         .get_profile_by_id(profile_id)
@@ -205,9 +274,22 @@ async fn get_portfolio_by_profile_id(
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
 
-    let wallets = state.db.get_profile_wallets(profile_id).await.map_err(AppError::Internal)?;
+    let wallets = state
+        .db
+        .get_profile_wallets(profile_id)
+        .await
+        .map_err(AppError::Internal)?;
 
     let addresses: Vec<String> = wallets.iter().map(|w| w.ordinals_address.clone()).collect();
+    let etag = profile_etag(&addresses);
+
+    if etag_matches(&headers, &etag) {
+        return Ok(not_modified(
+            &etag,
+            "public, max-age=60, s-maxage=300, stale-while-revalidate=60",
+        ));
+    }
+
     let wallet_entries: Vec<WalletEntry> = wallets
         .iter()
         .map(|w| WalletEntry {
@@ -225,20 +307,35 @@ async fn get_portfolio_by_profile_id(
     )
     .await?;
 
-    Ok(Json(ProfilePortfolioResponse {
-        profile_id: profile_id.to_string(),
-        addresses: wallet_entries,
-        bitmaps,
-        traits,
-        total,
-        page,
-        has_more,
-    }))
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=60, s-maxage=300, stale-while-revalidate=60"),
+    );
+    resp_headers.insert(
+        ETAG,
+        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+
+    Ok((
+        resp_headers,
+        Json(ProfilePortfolioResponse {
+            profile_id: profile_id.to_string(),
+            addresses: wallet_entries,
+            bitmaps,
+            traits,
+            total,
+            page,
+            has_more,
+        }),
+    )
+        .into_response())
 }
 
-/// HEAD /api/portfolio/profile/:profile_id — returns all ordinals addresses in X-Portfolio-Addresses header
+/// HEAD /api/portfolio/profile/:profile_id — cheap staleness probe; same ETag as GET
 async fn head_portfolio_addresses(
     State(state): State<AppState>,
+    req_headers: HeaderMap,
     Path(profile_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     state
@@ -254,11 +351,20 @@ async fn head_portfolio_addresses(
         .await
         .map_err(AppError::Internal)?;
 
-    let header_val = addresses.join(",");
+    let etag = profile_etag(&addresses);
+
     let mut headers = HeaderMap::new();
     headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=60, s-maxage=300"),
+    );
+    headers.insert(
+        ETAG,
+        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+    headers.insert(
         "X-Portfolio-Addresses",
-        HeaderValue::from_str(&header_val)
+        HeaderValue::from_str(&addresses.join(","))
             .unwrap_or_else(|_| HeaderValue::from_static("")),
     );
     headers.insert(
@@ -266,10 +372,19 @@ async fn head_portfolio_addresses(
         HeaderValue::from_str(&addresses.len().to_string())
             .unwrap_or_else(|_| HeaderValue::from_static("0")),
     );
+
+    if etag_matches(&req_headers, &etag) {
+        return Ok((StatusCode::NOT_MODIFIED, headers));
+    }
+
     Ok((StatusCode::OK, headers))
 }
 
-/// Shared logic: fetch inscription IDs for all addresses, then query bitmaps + traits.
+// ---------------------------------------------------------------------------
+// Shared fetch logic
+// ---------------------------------------------------------------------------
+
+/// Fetch inscription IDs for all addresses, then query bitmaps + traits.
 /// Returns (bitmaps, traits, total, page, has_more).
 async fn run_multi_portfolio(
     state: &AppState,
