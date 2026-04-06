@@ -48,6 +48,12 @@ pub struct OrdAddressResponse {
     pub inscriptions: Vec<String>,
 }
 
+/// Lite address info as returned by GET /address/{addr}/lite
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrdAddressLiteResponse {
+    pub outputs_count: u64,
+}
+
 /// Sat info as returned by GET /sat/{n}
 #[derive(Debug, Clone, Deserialize)]
 pub struct SatInfo {
@@ -207,6 +213,16 @@ impl OrdClient {
         }
 
         Ok(inscriptions)
+    }
+
+    /// Fetch the outputs count for a Bitcoin address (cheap staleness probe).
+    ///
+    /// Calls `GET /address/{address}/lite`.
+    pub async fn get_address_outputs_count(&self, address: &str) -> Result<u64> {
+        let resp = self
+            .get_json::<OrdAddressLiteResponse>(&format!("/address/{address}/lite"))
+            .await?;
+        Ok(resp.outputs_count)
     }
 
     /// Fetch all inscription IDs owned by a Bitcoin address.

@@ -28,11 +28,22 @@ pub fn router() -> Router<AppState> {
 // ETag helpers
 // ---------------------------------------------------------------------------
 
-/// Generates a weak ETag from the sorted set of ordinals addresses.
-/// Consistent between HEAD and GET — cheap (DB-only, no ord fetch).
-/// Busts when wallets are added or removed. New inscriptions in existing
-/// wallets are bounded by Cache-Control max-age instead.
-fn profile_etag(addresses: &[String]) -> String {
+/// Generates a weak ETag from (address, outputs_count) pairs.
+/// Sorted by address for stability. Busts when wallets are added/removed
+/// OR when outputs (inscriptions) are added/removed from any wallet.
+fn profile_etag(address_counts: &[(String, u64)]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut sorted = address_counts.to_vec();
+    sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let mut h = DefaultHasher::new();
+    sorted.hash(&mut h);
+    format!("W/\"{:016x}\"", h.finish())
+}
+
+/// Cheap addresses-only ETag used by HEAD /profile/:id.
+/// Does not include counts — stays DB-only.
+fn head_etag(addresses: &[String]) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut sorted = addresses.to_vec();
@@ -215,7 +226,8 @@ async fn get_my_portfolio(
         .map_err(AppError::Internal)?;
 
     let addresses: Vec<String> = wallets.iter().map(|w| w.ordinals_address.clone()).collect();
-    let etag = profile_etag(&addresses);
+    let address_counts = fetch_address_counts(&state, &addresses).await?;
+    let etag = profile_etag(&address_counts);
 
     if etag_matches(&headers, &etag) {
         return Ok(not_modified(&etag, "private, max-age=600"));
@@ -281,7 +293,8 @@ async fn get_portfolio_by_profile_id(
         .map_err(AppError::Internal)?;
 
     let addresses: Vec<String> = wallets.iter().map(|w| w.ordinals_address.clone()).collect();
-    let etag = profile_etag(&addresses);
+    let address_counts = fetch_address_counts(&state, &addresses).await?;
+    let etag = profile_etag(&address_counts);
 
     if etag_matches(&headers, &etag) {
         return Ok(not_modified(
@@ -332,7 +345,7 @@ async fn get_portfolio_by_profile_id(
         .into_response())
 }
 
-/// HEAD /api/portfolio/profile/:profile_id — cheap staleness probe; same ETag as GET
+/// HEAD /api/portfolio/profile/:profile_id — cheap staleness probe; addresses-only ETag
 async fn head_portfolio_addresses(
     State(state): State<AppState>,
     req_headers: HeaderMap,
@@ -351,7 +364,7 @@ async fn head_portfolio_addresses(
         .await
         .map_err(AppError::Internal)?;
 
-    let etag = profile_etag(&addresses);
+    let etag = head_etag(&addresses);
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -383,6 +396,33 @@ async fn head_portfolio_addresses(
 // ---------------------------------------------------------------------------
 // Shared fetch logic
 // ---------------------------------------------------------------------------
+
+/// Fetch outputs_count for each address via GET /address/{addr}/lite in parallel.
+/// Returns sorted (address, count) pairs for ETag computation.
+async fn fetch_address_counts(
+    state: &AppState,
+    addresses: &[String],
+) -> Result<Vec<(String, u64)>, AppError> {
+    let futs: Vec<_> = addresses
+        .iter()
+        .map(|addr| {
+            let client = state.ord_client.clone();
+            let addr = addr.clone();
+            async move {
+                let count = client.get_address_outputs_count(&addr).await?;
+                Ok::<_, anyhow::Error>((addr, count))
+            }
+        })
+        .collect();
+
+    stream::iter(futs)
+        .buffer_unordered(10)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(|r| r.map_err(AppError::Internal))
+        .collect()
+}
 
 /// Fetch inscription IDs for all addresses, then query bitmaps + traits.
 /// Returns (bitmaps, traits, total, page, has_more).
