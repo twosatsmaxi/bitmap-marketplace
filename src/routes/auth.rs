@@ -39,6 +39,7 @@ pub fn router() -> Router<AppState> {
         .route("/profile", get(get_profile))
         .route("/wallets/:address", patch(update_wallet_label))
         .route("/wallets/:address", delete(remove_wallet))
+        .route("/logout", post(logout))
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +452,24 @@ async fn update_wallet_label(
 
     let wallets = state.db.get_profile_wallets(profile.id).await?;
     Ok(Json(build_profile_response(&profile, &wallets)))
+}
+
+// ---------------------------------------------------------------------------
+// POST /logout
+// ---------------------------------------------------------------------------
+
+async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    // If the user has a valid token, revoke it by bumping token_version
+    if let Ok(profile) = authenticate(&headers, &state).await {
+        state.db.increment_token_version(profile.id).await?;
+    }
+
+    // Always clear the cookie, even if token was missing/invalid
+    let cookie = "bitmap_token=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0";
+    Ok(([(SET_COOKIE, cookie)], Json(serde_json::json!({"ok": true}))))
 }
 
 #[cfg(test)]
