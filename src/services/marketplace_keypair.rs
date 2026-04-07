@@ -47,6 +47,17 @@ impl MarketplaceKeypair {
     }
 }
 
+/// Test-only constructor — produces a valid but insecure keypair from a known seed.
+#[cfg(test)]
+impl MarketplaceKeypair {
+    pub fn for_testing() -> Arc<Self> {
+        // 0x01 key: well-known test seed, valid for secp256k1 (far below curve order)
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[0x01u8; 32]).unwrap();
+        Arc::new(Self { secp, secret_key })
+    }
+}
+
 impl std::fmt::Debug for MarketplaceKeypair {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "MarketplaceKeypair {{ pubkey: {} }}", self.pubkey_hex())

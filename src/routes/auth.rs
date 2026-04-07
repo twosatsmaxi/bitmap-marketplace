@@ -1,14 +1,15 @@
+use async_trait::async_trait;
 use axum::{
     extract::{Path, Query, State},
-    http::{header::{CACHE_CONTROL, SET_COOKIE}, HeaderMap},
+    http::{header::{CACHE_CONTROL, SET_COOKIE}, request::Parts, HeaderMap},
     response::IntoResponse,
     routing::{delete, get, patch, post},
     Json, Router,
 };
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::Network;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-
 
 use crate::{
     db::profiles::{Profile, ProfileWallet},
@@ -146,7 +147,7 @@ pub async fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<Profi
     let token_str = extract_token(headers)
         .ok_or_else(|| AppError::Unauthorized("Missing authorization token".to_string()))?;
 
-    let claims = jwt::verify_token(&token_str, &state.jwt_secret)
+    let claims = jwt::verify_token(&token_str, state.jwt_secret.expose_secret())
         .map_err(|_| AppError::Unauthorized("Invalid or expired token".to_string()))?;
 
     let profile = state
@@ -160,6 +161,26 @@ pub async fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<Profi
     }
 
     Ok(profile)
+}
+
+/// Axum extractor for required authentication.
+/// Handlers that declare `AuthenticatedUser(profile): AuthenticatedUser` in their signature
+/// will automatically receive a 401 if the request has no valid token — the handler body
+/// never runs with an unauthenticated caller.
+pub struct AuthenticatedUser(pub Profile);
+
+#[async_trait]
+impl axum::extract::FromRequestParts<AppState> for AuthenticatedUser {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        authenticate(&parts.headers, state)
+            .await
+            .map(AuthenticatedUser)
+    }
 }
 
 fn auth_response_with_cookie(auth_resp: AuthResponse, token: &str) -> impl IntoResponse {
@@ -229,7 +250,7 @@ async fn get_challenge(
             address: query.address,
             expires_at,
         },
-    );
+    ).await;
 
     Ok((
         [(CACHE_CONTROL, "no-store, no-cache")],
@@ -269,11 +290,10 @@ async fn connect_wallet(
     let now = chrono::Utc::now();
 
     // 1. Verify the challenge exists and hasn't expired
-    let challenge = {
-        state.challenges
-            .remove(&body.nonce)
-            .ok_or_else(|| AppError::BadRequest("Challenge nonce not found — it may have expired or been invalidated. Please request a new challenge and try again.".into()))?
-    };
+    let challenge = state.challenges
+        .remove(&body.nonce)
+        .await
+        .ok_or_else(|| AppError::BadRequest("Challenge nonce not found — it may have expired or been invalidated. Please request a new challenge and try again.".into()))?;
 
     // Use the captured time for expiration check (TOCTOU fix)
     if challenge.expires_at < now {
@@ -305,7 +325,7 @@ async fn connect_wallet(
     // 3. Check if a profile already exists for this ordinals address.
     if let Some(profile) = db.get_profile_by_address(&body.ordinals_address).await? {
         let wallets = db.get_profile_wallets(profile.id).await?;
-        let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, &state.jwt_secret)
+        let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, state.jwt_secret.expose_secret())
             .map_err(|e| AppError::Internal(e))?;
 
         let response = AuthResponse {
@@ -318,7 +338,7 @@ async fn connect_wallet(
     // 4. No existing profile for this address — check for a JWT to link to an
     //    existing profile.
     if let Some(token_str) = extract_token(&headers) {
-        if let Ok(claims) = jwt::verify_token(&token_str, &state.jwt_secret) {
+        if let Ok(claims) = jwt::verify_token(&token_str, state.jwt_secret.expose_secret()) {
             let profile = db
                 .get_profile_by_id(claims.profile_id)
                 .await?
@@ -337,7 +357,7 @@ async fn connect_wallet(
 
             let wallets = db.get_profile_wallets(profile.id).await?;
             let token =
-                jwt::create_token(profile.id, &profile.primary_address, profile.token_version, &state.jwt_secret)
+                jwt::create_token(profile.id, &profile.primary_address, profile.token_version, state.jwt_secret.expose_secret())
                     .map_err(|e| AppError::Internal(e))?;
 
             let response = AuthResponse {
@@ -361,7 +381,7 @@ async fn connect_wallet(
     .await?;
 
     let wallets = db.get_profile_wallets(profile.id).await?;
-    let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, &state.jwt_secret)
+    let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, state.jwt_secret.expose_secret())
         .map_err(|e| AppError::Internal(e))?;
 
     let response = AuthResponse {
@@ -376,10 +396,9 @@ async fn connect_wallet(
 // ---------------------------------------------------------------------------
 
 async fn get_profile(
+    AuthenticatedUser(profile): AuthenticatedUser,
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Result<Json<ProfileResponse>, AppError> {
-    let profile = authenticate(&headers, &state).await?;
     let wallets = state.db.get_profile_wallets(profile.id).await?;
     Ok(Json(build_profile_response(&profile, &wallets)))
 }
@@ -389,11 +408,10 @@ async fn get_profile(
 // ---------------------------------------------------------------------------
 
 async fn remove_wallet(
+    AuthenticatedUser(profile): AuthenticatedUser,
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(address): Path<String>,
 ) -> Result<Json<ProfileResponse>, AppError> {
-    let profile = authenticate(&headers, &state).await?;
 
     // remove_wallet_from_profile checks count internally and returns false if last wallet
     let removed = state
@@ -419,12 +437,11 @@ async fn remove_wallet(
 // ---------------------------------------------------------------------------
 
 async fn update_wallet_label(
+    AuthenticatedUser(profile): AuthenticatedUser,
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(address): Path<String>,
     Json(body): Json<UpdateWalletLabelRequest>,
 ) -> Result<Json<ProfileResponse>, AppError> {
-    let profile = authenticate(&headers, &state).await?;
 
     // Validate the address format
     if !validate_bitcoin_address(&address, state.allowed_address_network) {
@@ -649,5 +666,140 @@ mod tests {
         let json = r#"{"label":"Test Label"}"#;
         let req: UpdateWalletLabelRequest = serde_json::from_str(json).expect("should parse");
         assert_eq!(req.label, "Test Label");
+    }
+
+    // -----------------------------------------------------------------------
+    // AuthenticatedUser extractor — rejection cases
+    //
+    // These tests verify that handlers using the AuthenticatedUser extractor
+    // automatically return 401 before the handler body runs, without needing
+    // a real database (the pool is lazy and never queried for rejections).
+    // -----------------------------------------------------------------------
+
+    fn test_state_with_secret(jwt_secret: &str) -> AppState {
+        use secrecy::SecretString;
+        use sqlx::postgres::PgPoolOptions;
+        AppState {
+            db: crate::db::Database {
+                pool: PgPoolOptions::new()
+                    .connect_lazy("postgresql://localhost/testdb_unreachable")
+                    .unwrap(),
+            },
+            ws_broadcaster: std::sync::Arc::new(crate::ws::WsBroadcaster::new()),
+            marketplace_keypair: crate::services::marketplace_keypair::MarketplaceKeypair::for_testing(),
+            http_client: reqwest::Client::new(),
+            ord_client: crate::services::ord::OrdClient::new(),
+            render_api_base: "http://localhost".to_string(),
+            network: bitcoin::Network::Regtest,
+            allowed_address_network: bitcoin::Network::Bitcoin,
+            jwt_secret: SecretString::new(jwt_secret.to_string()),
+            marketplace_fee_address: None,
+            marketplace_fee_bps: 0,
+            challenges: moka::future::Cache::builder().max_capacity(10).build(),
+        }
+    }
+
+    async fn dummy_protected_handler(
+        AuthenticatedUser(_profile): AuthenticatedUser,
+    ) -> axum::http::StatusCode {
+        axum::http::StatusCode::OK
+    }
+
+    #[tokio::test]
+    async fn extractor_returns_401_when_no_token_provided() {
+        let state = test_state_with_secret("test-secret");
+        let app = axum::Router::new()
+            .route("/protected", axum::routing::get(dummy_protected_handler))
+            .with_state(state);
+
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri("/protected")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn extractor_returns_401_for_garbage_jwt() {
+        let state = test_state_with_secret("test-secret");
+        let app = axum::Router::new()
+            .route("/protected", axum::routing::get(dummy_protected_handler))
+            .with_state(state);
+
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri("/protected")
+                .header("Authorization", "Bearer not.a.real.jwt")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn extractor_returns_401_for_jwt_signed_with_wrong_secret() {
+        // Token is valid JWT structure but signed with a different secret
+        let token = crate::services::jwt::create_token(
+            uuid::Uuid::new_v4(),
+            "bc1qtest",
+            1,
+            "wrong-secret",
+        )
+        .unwrap();
+
+        let state = test_state_with_secret("correct-secret");
+        let app = axum::Router::new()
+            .route("/protected", axum::routing::get(dummy_protected_handler))
+            .with_state(state);
+
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri("/protected")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn extractor_error_body_is_json_with_error_key() {
+        use http_body_util::BodyExt;
+
+        let state = test_state_with_secret("test-secret");
+        let app = axum::Router::new()
+            .route("/protected", axum::routing::get(dummy_protected_handler))
+            .with_state(state);
+
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri("/protected")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("body should be JSON");
+        assert!(
+            body.get("error").is_some(),
+            "401 body must have an 'error' key; got: {body}"
+        );
     }
 }

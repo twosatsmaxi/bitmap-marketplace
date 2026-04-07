@@ -1,7 +1,13 @@
 use anyhow::Result;
-use axum::http::StatusCode;
+use axum::extract::State;
+use axum::http::{
+    header::{AUTHORIZATION, CONTENT_TYPE},
+    Method, StatusCode,
+};
+use axum::routing::get;
 use axum::Router;
 use bitcoin::Network;
+use secrecy::SecretString;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -12,6 +18,7 @@ use tower_governor::GovernorLayer;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{self, TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -43,10 +50,20 @@ pub struct AppState {
     pub render_api_base: String,
     pub network: Network,
     pub allowed_address_network: Network,
-    pub jwt_secret: String,
+    pub jwt_secret: SecretString,
     pub marketplace_fee_address: Option<String>,
     pub marketplace_fee_bps: u64,
-    pub challenges: moka::sync::Cache<String, routes::auth::Challenge>,
+    pub challenges: moka::future::Cache<String, routes::auth::Challenge>,
+}
+
+/// GET /health — unauthenticated, not rate-limited.
+/// Returns 200 if the database is reachable, 503 otherwise.
+/// Used by load balancers and Kubernetes liveness/readiness probes.
+async fn health_handler(State(s): State<AppState>) -> impl axum::response::IntoResponse {
+    match sqlx::query("SELECT 1").execute(&s.db.pool).await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 #[tokio::main]
@@ -130,8 +147,10 @@ async fn main() -> Result<()> {
     let render_api_base =
         std::env::var("RENDER_API_BASE").unwrap_or_else(|_| "http://r2d2.local:3020".to_string());
 
-    let jwt_secret = std::env::var("JWT_SECRET")
-        .expect("JWT_SECRET must be set (use a strong random secret in production)");
+    let jwt_secret = SecretString::new(
+        std::env::var("JWT_SECRET")
+            .expect("JWT_SECRET must be set (use a strong random secret in production)"),
+    );
 
     let frontend_url = std::env::var("FRONTEND_URL").ok();
 
@@ -145,7 +164,12 @@ async fn main() -> Result<()> {
         db,
         ws_broadcaster: ws_broadcaster.clone(),
         marketplace_keypair,
-        http_client: reqwest::Client::new(),
+        http_client: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .user_agent("bitmap-marketplace/0.1")
+            .build()
+            .expect("failed to build HTTP client"),
         ord_client: OrdClient::new(),
         render_api_base,
         network,
@@ -153,7 +177,7 @@ async fn main() -> Result<()> {
         jwt_secret,
         marketplace_fee_address,
         marketplace_fee_bps,
-        challenges: moka::sync::Cache::builder()
+        challenges: moka::future::Cache::builder()
             .max_capacity(MAX_CHALLENGES)
             .time_to_live(CHALLENGE_TTL)
             .build(),
@@ -181,6 +205,18 @@ async fn main() -> Result<()> {
             .unwrap(),
     );
 
+    // Spawn background task to evict stale rate-limit entries (prevents unbounded memory growth).
+    let governor_conf_cleanup = Arc::clone(&governor_conf);
+    let auth_governor_conf_cleanup = Arc::clone(&auth_governor_conf);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            governor_conf_cleanup.limiter().retain_recent();
+            auth_governor_conf_cleanup.limiter().retain_recent();
+        }
+    });
+
     // /api/auth subrouter — stricter rate limiting to prevent brute-force attacks
     let auth_api_router = routes::auth_router()
         .layer(GovernorLayer {
@@ -205,6 +241,7 @@ async fn main() -> Result<()> {
     let ws_router = ws::router(ws_broadcaster);
 
     let app = Router::new()
+        .route("/health", get(health_handler))
         .nest("/api/auth", auth_api_router)
         .nest("/api", api_router)
         .merge(ws_router)
@@ -221,6 +258,8 @@ async fn main() -> Result<()> {
                 ),
         )
         .layer(axum::middleware::from_fn(log_rate_limited))
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(build_cors_layer(frontend_url.as_deref()))
         .with_state(state);
 
@@ -272,9 +311,28 @@ async fn log_rate_limited(
 }
 
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install CTRL+C handler");
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install CTRL+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
     tracing::info!("shutdown signal received");
 }
 
@@ -283,13 +341,21 @@ async fn shutdown_signal() {
 /// Otherwise, allows any origin (development mode).
 fn build_cors_layer(frontend_url: Option<&str>) -> CorsLayer {
     let mut cors = CorsLayer::new()
-        .allow_methods(Any)
-        .allow_headers(Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE])
         .expose_headers([
             axum::http::header::ETAG,
             axum::http::header::CACHE_CONTROL,
-        ]);
-    
+        ])
+        .max_age(Duration::from_secs(3600));
+
     if let Some(origin) = frontend_url {
         // Production: restrict to specific frontend origin
         // Note: We don't allow credentials for CORS - cookies are SameSite=Strict
@@ -387,5 +453,207 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let origin = resp.headers().get("access-control-allow-origin").unwrap();
         assert_eq!(origin, "*");
+    }
+
+    // -----------------------------------------------------------------------
+    // CORS method and header restriction (changed from Any to explicit list)
+    // -----------------------------------------------------------------------
+
+    fn preflight(app: Router, origin: &str, method: &str) -> impl std::future::Future<Output = axum::response::Response> {
+        let req = Request::builder()
+            .method("OPTIONS")
+            .uri("/ping")
+            .header("Origin", origin)
+            .header("Access-Control-Request-Method", method)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        async move { app.oneshot(req).await.unwrap() }
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_lists_all_allowed_methods() {
+        let cors = build_cors_layer(Some("http://localhost:3001"));
+        let app = test_app(cors);
+        let resp = preflight(app, "http://localhost:3001", "GET").await;
+
+        let methods = resp
+            .headers()
+            .get("access-control-allow-methods")
+            .expect("Access-Control-Allow-Methods must be present")
+            .to_str()
+            .unwrap()
+            .to_uppercase();
+
+        for method in &["GET", "POST", "PUT", "PATCH", "DELETE"] {
+            assert!(methods.contains(method), "{method} missing from allowed methods; got: {methods}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_authorization_and_content_type_headers() {
+        let cors = build_cors_layer(Some("http://localhost:3001"));
+        let app = test_app(cors);
+        let req = Request::builder()
+            .method("OPTIONS")
+            .uri("/ping")
+            .header("Origin", "http://localhost:3001")
+            .header("Access-Control-Request-Method", "POST")
+            .header("Access-Control-Request-Headers", "authorization, content-type")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        let headers = resp
+            .headers()
+            .get("access-control-allow-headers")
+            .expect("Access-Control-Allow-Headers must be present")
+            .to_str()
+            .unwrap()
+            .to_lowercase();
+
+        assert!(headers.contains("authorization"), "authorization missing; got: {headers}");
+        assert!(headers.contains("content-type"), "content-type missing; got: {headers}");
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_sets_max_age_of_one_hour() {
+        let cors = build_cors_layer(Some("http://localhost:3001"));
+        let app = test_app(cors);
+        let resp = preflight(app, "http://localhost:3001", "GET").await;
+
+        let max_age = resp
+            .headers()
+            .get("access-control-max-age")
+            .expect("Access-Control-Max-Age must be present")
+            .to_str()
+            .unwrap();
+
+        assert_eq!(max_age, "3600");
+    }
+
+    // -----------------------------------------------------------------------
+    // SecretString — jwt_secret must not appear in debug output
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn jwt_secret_is_redacted_in_debug_output() {
+        let secret = secrecy::SecretString::new("super-sensitive-jwt-key".to_string());
+        let debug = format!("{secret:?}");
+        assert!(
+            !debug.contains("super-sensitive-jwt-key"),
+            "Secret value must not appear in Debug output; got: {debug}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Request ID — every response must carry x-request-id
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn request_id_is_propagated_to_response() {
+        let app = Router::new()
+            .route("/ping", get(|| async { "pong" }))
+            .layer(PropagateRequestIdLayer::x_request_id())
+            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let id = resp
+            .headers()
+            .get("x-request-id")
+            .expect("x-request-id must be present on every response")
+            .to_str()
+            .unwrap();
+
+        // UUID v4: 8-4-4-4-12 hex digits with dashes
+        assert_eq!(id.len(), 36, "x-request-id should be a UUID; got: {id}");
+        assert_eq!(id.chars().filter(|&c| c == '-').count(), 4, "UUID must have 4 dashes; got: {id}");
+    }
+
+    #[tokio::test]
+    async fn client_supplied_request_id_is_preserved() {
+        let app = Router::new()
+            .route("/ping", get(|| async { "pong" }))
+            .layer(PropagateRequestIdLayer::x_request_id())
+            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header("x-request-id", "my-request-id-123")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let id = resp
+            .headers()
+            .get("x-request-id")
+            .expect("x-request-id must be present")
+            .to_str()
+            .unwrap();
+
+        assert_eq!(id, "my-request-id-123", "client-supplied request ID should be preserved");
+    }
+
+    // -----------------------------------------------------------------------
+    // Health endpoint — returns 503 when the database is unreachable
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn health_returns_503_when_db_is_unreachable() {
+        use secrecy::SecretString;
+        use sqlx::postgres::PgPoolOptions;
+
+        // Lazy pool pointing at an address that will never connect
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(1))
+            .connect_lazy("postgresql://user:pass@127.0.0.1:1/nonexistent")
+            .unwrap();
+
+        let state = AppState {
+            db: crate::db::Database { pool },
+            ws_broadcaster: std::sync::Arc::new(crate::ws::WsBroadcaster::new()),
+            marketplace_keypair: crate::services::marketplace_keypair::MarketplaceKeypair::for_testing(),
+            http_client: reqwest::Client::new(),
+            ord_client: crate::services::ord::OrdClient::new(),
+            render_api_base: "http://localhost".to_string(),
+            network: bitcoin::Network::Regtest,
+            allowed_address_network: bitcoin::Network::Bitcoin,
+            jwt_secret: SecretString::new("test-secret".to_string()),
+            marketplace_fee_address: None,
+            marketplace_fee_bps: 0,
+            challenges: moka::future::Cache::builder().max_capacity(10).build(),
+        };
+
+        let app = Router::new()
+            .route("/health", get(health_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "/health should return 503 when database is unreachable"
+        );
     }
 }
