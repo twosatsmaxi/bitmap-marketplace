@@ -667,4 +667,139 @@ mod tests {
         let req: UpdateWalletLabelRequest = serde_json::from_str(json).expect("should parse");
         assert_eq!(req.label, "Test Label");
     }
+
+    // -----------------------------------------------------------------------
+    // AuthenticatedUser extractor — rejection cases
+    //
+    // These tests verify that handlers using the AuthenticatedUser extractor
+    // automatically return 401 before the handler body runs, without needing
+    // a real database (the pool is lazy and never queried for rejections).
+    // -----------------------------------------------------------------------
+
+    fn test_state_with_secret(jwt_secret: &str) -> AppState {
+        use secrecy::SecretString;
+        use sqlx::postgres::PgPoolOptions;
+        AppState {
+            db: crate::db::Database {
+                pool: PgPoolOptions::new()
+                    .connect_lazy("postgresql://localhost/testdb_unreachable")
+                    .unwrap(),
+            },
+            ws_broadcaster: std::sync::Arc::new(crate::ws::WsBroadcaster::new()),
+            marketplace_keypair: crate::services::marketplace_keypair::MarketplaceKeypair::for_testing(),
+            http_client: reqwest::Client::new(),
+            ord_client: crate::services::ord::OrdClient::new(),
+            render_api_base: "http://localhost".to_string(),
+            network: bitcoin::Network::Regtest,
+            allowed_address_network: bitcoin::Network::Bitcoin,
+            jwt_secret: SecretString::new(jwt_secret.to_string()),
+            marketplace_fee_address: None,
+            marketplace_fee_bps: 0,
+            challenges: moka::future::Cache::builder().max_capacity(10).build(),
+        }
+    }
+
+    async fn dummy_protected_handler(
+        AuthenticatedUser(_profile): AuthenticatedUser,
+    ) -> axum::http::StatusCode {
+        axum::http::StatusCode::OK
+    }
+
+    #[tokio::test]
+    async fn extractor_returns_401_when_no_token_provided() {
+        let state = test_state_with_secret("test-secret");
+        let app = axum::Router::new()
+            .route("/protected", axum::routing::get(dummy_protected_handler))
+            .with_state(state);
+
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri("/protected")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn extractor_returns_401_for_garbage_jwt() {
+        let state = test_state_with_secret("test-secret");
+        let app = axum::Router::new()
+            .route("/protected", axum::routing::get(dummy_protected_handler))
+            .with_state(state);
+
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri("/protected")
+                .header("Authorization", "Bearer not.a.real.jwt")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn extractor_returns_401_for_jwt_signed_with_wrong_secret() {
+        // Token is valid JWT structure but signed with a different secret
+        let token = crate::services::jwt::create_token(
+            uuid::Uuid::new_v4(),
+            "bc1qtest",
+            1,
+            "wrong-secret",
+        )
+        .unwrap();
+
+        let state = test_state_with_secret("correct-secret");
+        let app = axum::Router::new()
+            .route("/protected", axum::routing::get(dummy_protected_handler))
+            .with_state(state);
+
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri("/protected")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn extractor_error_body_is_json_with_error_key() {
+        use http_body_util::BodyExt;
+
+        let state = test_state_with_secret("test-secret");
+        let app = axum::Router::new()
+            .route("/protected", axum::routing::get(dummy_protected_handler))
+            .with_state(state);
+
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri("/protected")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("body should be JSON");
+        assert!(
+            body.get("error").is_some(),
+            "401 body must have an 'error' key; got: {body}"
+        );
+    }
 }

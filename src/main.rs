@@ -56,6 +56,16 @@ pub struct AppState {
     pub challenges: moka::future::Cache<String, routes::auth::Challenge>,
 }
 
+/// GET /health — unauthenticated, not rate-limited.
+/// Returns 200 if the database is reachable, 503 otherwise.
+/// Used by load balancers and Kubernetes liveness/readiness probes.
+async fn health_handler(State(s): State<AppState>) -> impl axum::response::IntoResponse {
+    match sqlx::query("SELECT 1").execute(&s.db.pool).await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -172,14 +182,6 @@ async fn main() -> Result<()> {
             .time_to_live(CHALLENGE_TTL)
             .build(),
     };
-
-    // Health check endpoint — unauthenticated, not rate-limited, for load balancers / k8s probes.
-    async fn health_handler(State(s): State<AppState>) -> impl axum::response::IntoResponse {
-        match sqlx::query("SELECT 1").execute(&s.db.pool).await {
-            Ok(_) => StatusCode::OK,
-            Err(_) => StatusCode::SERVICE_UNAVAILABLE,
-        }
-    }
 
     // Per-IP rate limiting config.
     // Uses PeerIpKeyExtractor (TCP peer address) — correct for direct deployments with no
@@ -451,5 +453,207 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let origin = resp.headers().get("access-control-allow-origin").unwrap();
         assert_eq!(origin, "*");
+    }
+
+    // -----------------------------------------------------------------------
+    // CORS method and header restriction (changed from Any to explicit list)
+    // -----------------------------------------------------------------------
+
+    fn preflight(app: Router, origin: &str, method: &str) -> impl std::future::Future<Output = axum::response::Response> {
+        let req = Request::builder()
+            .method("OPTIONS")
+            .uri("/ping")
+            .header("Origin", origin)
+            .header("Access-Control-Request-Method", method)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        async move { app.oneshot(req).await.unwrap() }
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_lists_all_allowed_methods() {
+        let cors = build_cors_layer(Some("http://localhost:3001"));
+        let app = test_app(cors);
+        let resp = preflight(app, "http://localhost:3001", "GET").await;
+
+        let methods = resp
+            .headers()
+            .get("access-control-allow-methods")
+            .expect("Access-Control-Allow-Methods must be present")
+            .to_str()
+            .unwrap()
+            .to_uppercase();
+
+        for method in &["GET", "POST", "PUT", "PATCH", "DELETE"] {
+            assert!(methods.contains(method), "{method} missing from allowed methods; got: {methods}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_authorization_and_content_type_headers() {
+        let cors = build_cors_layer(Some("http://localhost:3001"));
+        let app = test_app(cors);
+        let req = Request::builder()
+            .method("OPTIONS")
+            .uri("/ping")
+            .header("Origin", "http://localhost:3001")
+            .header("Access-Control-Request-Method", "POST")
+            .header("Access-Control-Request-Headers", "authorization, content-type")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        let headers = resp
+            .headers()
+            .get("access-control-allow-headers")
+            .expect("Access-Control-Allow-Headers must be present")
+            .to_str()
+            .unwrap()
+            .to_lowercase();
+
+        assert!(headers.contains("authorization"), "authorization missing; got: {headers}");
+        assert!(headers.contains("content-type"), "content-type missing; got: {headers}");
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_sets_max_age_of_one_hour() {
+        let cors = build_cors_layer(Some("http://localhost:3001"));
+        let app = test_app(cors);
+        let resp = preflight(app, "http://localhost:3001", "GET").await;
+
+        let max_age = resp
+            .headers()
+            .get("access-control-max-age")
+            .expect("Access-Control-Max-Age must be present")
+            .to_str()
+            .unwrap();
+
+        assert_eq!(max_age, "3600");
+    }
+
+    // -----------------------------------------------------------------------
+    // SecretString — jwt_secret must not appear in debug output
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn jwt_secret_is_redacted_in_debug_output() {
+        let secret = secrecy::SecretString::new("super-sensitive-jwt-key".to_string());
+        let debug = format!("{secret:?}");
+        assert!(
+            !debug.contains("super-sensitive-jwt-key"),
+            "Secret value must not appear in Debug output; got: {debug}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Request ID — every response must carry x-request-id
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn request_id_is_propagated_to_response() {
+        let app = Router::new()
+            .route("/ping", get(|| async { "pong" }))
+            .layer(PropagateRequestIdLayer::x_request_id())
+            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let id = resp
+            .headers()
+            .get("x-request-id")
+            .expect("x-request-id must be present on every response")
+            .to_str()
+            .unwrap();
+
+        // UUID v4: 8-4-4-4-12 hex digits with dashes
+        assert_eq!(id.len(), 36, "x-request-id should be a UUID; got: {id}");
+        assert_eq!(id.chars().filter(|&c| c == '-').count(), 4, "UUID must have 4 dashes; got: {id}");
+    }
+
+    #[tokio::test]
+    async fn client_supplied_request_id_is_preserved() {
+        let app = Router::new()
+            .route("/ping", get(|| async { "pong" }))
+            .layer(PropagateRequestIdLayer::x_request_id())
+            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header("x-request-id", "my-request-id-123")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let id = resp
+            .headers()
+            .get("x-request-id")
+            .expect("x-request-id must be present")
+            .to_str()
+            .unwrap();
+
+        assert_eq!(id, "my-request-id-123", "client-supplied request ID should be preserved");
+    }
+
+    // -----------------------------------------------------------------------
+    // Health endpoint — returns 503 when the database is unreachable
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn health_returns_503_when_db_is_unreachable() {
+        use secrecy::SecretString;
+        use sqlx::postgres::PgPoolOptions;
+
+        // Lazy pool pointing at an address that will never connect
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(1))
+            .connect_lazy("postgresql://user:pass@127.0.0.1:1/nonexistent")
+            .unwrap();
+
+        let state = AppState {
+            db: crate::db::Database { pool },
+            ws_broadcaster: std::sync::Arc::new(crate::ws::WsBroadcaster::new()),
+            marketplace_keypair: crate::services::marketplace_keypair::MarketplaceKeypair::for_testing(),
+            http_client: reqwest::Client::new(),
+            ord_client: crate::services::ord::OrdClient::new(),
+            render_api_base: "http://localhost".to_string(),
+            network: bitcoin::Network::Regtest,
+            allowed_address_network: bitcoin::Network::Bitcoin,
+            jwt_secret: SecretString::new("test-secret".to_string()),
+            marketplace_fee_address: None,
+            marketplace_fee_bps: 0,
+            challenges: moka::future::Cache::builder().max_capacity(10).build(),
+        };
+
+        let app = Router::new()
+            .route("/health", get(health_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "/health should return 503 when database is unreachable"
+        );
     }
 }
