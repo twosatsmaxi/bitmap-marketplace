@@ -26,7 +26,7 @@ pub fn router() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 const CACHE_PRIVATE: &str = "private, max-age=600";
-const CACHE_PUBLIC: &str = "public, max-age=60, s-maxage=300, stale-while-revalidate=60";
+const CACHE_PUBLIC: &str = "public, max-age=600, s-maxage=3600, stale-while-revalidate=60";
 
 /// Generates a weak ETag from (address, outputs_count) pairs plus query params.
 /// Sorted by address for stability. Busts when wallets are added/removed,
