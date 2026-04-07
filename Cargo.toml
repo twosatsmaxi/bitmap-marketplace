@@ -8,7 +8,7 @@ edition = "2021"
 axum = { version = "0.7", features = ["ws", "macros"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.4", features = ["limit"] }
-tower-http = { version = "0.5", features = ["cors", "trace", "limit", "timeout", "compression-gzip"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "limit", "timeout", "compression-gzip", "request-id"] }
 tower_governor = "0.4"
 
 # Serialization
@@ -29,7 +29,9 @@ anyhow = "1"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
+secrecy = "0.8"
+async-trait = "0.1"
 bytes = "1"
 dotenvy = "0.15"
 tokio-tungstenite = "0.21"
@@ -38,7 +40,7 @@ jsonwebtoken = "9"
 bip322 = "0.0.10"
 rand = "0.8"
 futures = "0.3"
-moka = { version = "0.12", features = ["sync"] }
+moka = { version = "0.12", features = ["future"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

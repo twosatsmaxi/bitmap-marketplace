@@ -1,14 +1,15 @@
+use async_trait::async_trait;
 use axum::{
     extract::{Path, Query, State},
-    http::{header::{CACHE_CONTROL, SET_COOKIE}, HeaderMap},
+    http::{header::{CACHE_CONTROL, SET_COOKIE}, request::Parts, HeaderMap},
     response::IntoResponse,
     routing::{delete, get, patch, post},
     Json, Router,
 };
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::Network;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-
 
 use crate::{
     db::profiles::{Profile, ProfileWallet},
@@ -146,7 +147,7 @@ pub async fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<Profi
     let token_str = extract_token(headers)
         .ok_or_else(|| AppError::Unauthorized("Missing authorization token".to_string()))?;
 
-    let claims = jwt::verify_token(&token_str, &state.jwt_secret)
+    let claims = jwt::verify_token(&token_str, state.jwt_secret.expose_secret())
         .map_err(|_| AppError::Unauthorized("Invalid or expired token".to_string()))?;
 
     let profile = state
@@ -160,6 +161,26 @@ pub async fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<Profi
     }
 
     Ok(profile)
+}
+
+/// Axum extractor for required authentication.
+/// Handlers that declare `AuthenticatedUser(profile): AuthenticatedUser` in their signature
+/// will automatically receive a 401 if the request has no valid token — the handler body
+/// never runs with an unauthenticated caller.
+pub struct AuthenticatedUser(pub Profile);
+
+#[async_trait]
+impl axum::extract::FromRequestParts<AppState> for AuthenticatedUser {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        authenticate(&parts.headers, state)
+            .await
+            .map(AuthenticatedUser)
+    }
 }
 
 fn auth_response_with_cookie(auth_resp: AuthResponse, token: &str) -> impl IntoResponse {
@@ -229,7 +250,7 @@ async fn get_challenge(
             address: query.address,
             expires_at,
         },
-    );
+    ).await;
 
     Ok((
         [(CACHE_CONTROL, "no-store, no-cache")],
@@ -269,11 +290,10 @@ async fn connect_wallet(
     let now = chrono::Utc::now();
 
     // 1. Verify the challenge exists and hasn't expired
-    let challenge = {
-        state.challenges
-            .remove(&body.nonce)
-            .ok_or_else(|| AppError::BadRequest("Challenge nonce not found — it may have expired or been invalidated. Please request a new challenge and try again.".into()))?
-    };
+    let challenge = state.challenges
+        .remove(&body.nonce)
+        .await
+        .ok_or_else(|| AppError::BadRequest("Challenge nonce not found — it may have expired or been invalidated. Please request a new challenge and try again.".into()))?;
 
     // Use the captured time for expiration check (TOCTOU fix)
     if challenge.expires_at < now {
@@ -305,7 +325,7 @@ async fn connect_wallet(
     // 3. Check if a profile already exists for this ordinals address.
     if let Some(profile) = db.get_profile_by_address(&body.ordinals_address).await? {
         let wallets = db.get_profile_wallets(profile.id).await?;
-        let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, &state.jwt_secret)
+        let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, state.jwt_secret.expose_secret())
             .map_err(|e| AppError::Internal(e))?;
 
         let response = AuthResponse {
@@ -318,7 +338,7 @@ async fn connect_wallet(
     // 4. No existing profile for this address — check for a JWT to link to an
     //    existing profile.
     if let Some(token_str) = extract_token(&headers) {
-        if let Ok(claims) = jwt::verify_token(&token_str, &state.jwt_secret) {
+        if let Ok(claims) = jwt::verify_token(&token_str, state.jwt_secret.expose_secret()) {
             let profile = db
                 .get_profile_by_id(claims.profile_id)
                 .await?
@@ -337,7 +357,7 @@ async fn connect_wallet(
 
             let wallets = db.get_profile_wallets(profile.id).await?;
             let token =
-                jwt::create_token(profile.id, &profile.primary_address, profile.token_version, &state.jwt_secret)
+                jwt::create_token(profile.id, &profile.primary_address, profile.token_version, state.jwt_secret.expose_secret())
                     .map_err(|e| AppError::Internal(e))?;
 
             let response = AuthResponse {
@@ -361,7 +381,7 @@ async fn connect_wallet(
     .await?;
 
     let wallets = db.get_profile_wallets(profile.id).await?;
-    let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, &state.jwt_secret)
+    let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, state.jwt_secret.expose_secret())
         .map_err(|e| AppError::Internal(e))?;
 
     let response = AuthResponse {
@@ -376,10 +396,9 @@ async fn connect_wallet(
 // ---------------------------------------------------------------------------
 
 async fn get_profile(
+    AuthenticatedUser(profile): AuthenticatedUser,
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Result<Json<ProfileResponse>, AppError> {
-    let profile = authenticate(&headers, &state).await?;
     let wallets = state.db.get_profile_wallets(profile.id).await?;
     Ok(Json(build_profile_response(&profile, &wallets)))
 }
@@ -389,11 +408,10 @@ async fn get_profile(
 // ---------------------------------------------------------------------------
 
 async fn remove_wallet(
+    AuthenticatedUser(profile): AuthenticatedUser,
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(address): Path<String>,
 ) -> Result<Json<ProfileResponse>, AppError> {
-    let profile = authenticate(&headers, &state).await?;
 
     // remove_wallet_from_profile checks count internally and returns false if last wallet
     let removed = state
@@ -419,12 +437,11 @@ async fn remove_wallet(
 // ---------------------------------------------------------------------------
 
 async fn update_wallet_label(
+    AuthenticatedUser(profile): AuthenticatedUser,
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(address): Path<String>,
     Json(body): Json<UpdateWalletLabelRequest>,
 ) -> Result<Json<ProfileResponse>, AppError> {
-    let profile = authenticate(&headers, &state).await?;
 
     // Validate the address format
     if !validate_bitcoin_address(&address, state.allowed_address_network) {

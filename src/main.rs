@@ -1,7 +1,13 @@
 use anyhow::Result;
-use axum::http::StatusCode;
+use axum::extract::State;
+use axum::http::{
+    header::{AUTHORIZATION, CONTENT_TYPE},
+    Method, StatusCode,
+};
+use axum::routing::get;
 use axum::Router;
 use bitcoin::Network;
+use secrecy::SecretString;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -12,6 +18,7 @@ use tower_governor::GovernorLayer;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{self, TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -43,10 +50,10 @@ pub struct AppState {
     pub render_api_base: String,
     pub network: Network,
     pub allowed_address_network: Network,
-    pub jwt_secret: String,
+    pub jwt_secret: SecretString,
     pub marketplace_fee_address: Option<String>,
     pub marketplace_fee_bps: u64,
-    pub challenges: moka::sync::Cache<String, routes::auth::Challenge>,
+    pub challenges: moka::future::Cache<String, routes::auth::Challenge>,
 }
 
 #[tokio::main]
@@ -130,8 +137,10 @@ async fn main() -> Result<()> {
     let render_api_base =
         std::env::var("RENDER_API_BASE").unwrap_or_else(|_| "http://r2d2.local:3020".to_string());
 
-    let jwt_secret = std::env::var("JWT_SECRET")
-        .expect("JWT_SECRET must be set (use a strong random secret in production)");
+    let jwt_secret = SecretString::new(
+        std::env::var("JWT_SECRET")
+            .expect("JWT_SECRET must be set (use a strong random secret in production)"),
+    );
 
     let frontend_url = std::env::var("FRONTEND_URL").ok();
 
@@ -145,7 +154,12 @@ async fn main() -> Result<()> {
         db,
         ws_broadcaster: ws_broadcaster.clone(),
         marketplace_keypair,
-        http_client: reqwest::Client::new(),
+        http_client: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .user_agent("bitmap-marketplace/0.1")
+            .build()
+            .expect("failed to build HTTP client"),
         ord_client: OrdClient::new(),
         render_api_base,
         network,
@@ -153,11 +167,19 @@ async fn main() -> Result<()> {
         jwt_secret,
         marketplace_fee_address,
         marketplace_fee_bps,
-        challenges: moka::sync::Cache::builder()
+        challenges: moka::future::Cache::builder()
             .max_capacity(MAX_CHALLENGES)
             .time_to_live(CHALLENGE_TTL)
             .build(),
     };
+
+    // Health check endpoint — unauthenticated, not rate-limited, for load balancers / k8s probes.
+    async fn health_handler(State(s): State<AppState>) -> impl axum::response::IntoResponse {
+        match sqlx::query("SELECT 1").execute(&s.db.pool).await {
+            Ok(_) => StatusCode::OK,
+            Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
 
     // Per-IP rate limiting config.
     // Uses PeerIpKeyExtractor (TCP peer address) — correct for direct deployments with no
@@ -180,6 +202,18 @@ async fn main() -> Result<()> {
             .finish()
             .unwrap(),
     );
+
+    // Spawn background task to evict stale rate-limit entries (prevents unbounded memory growth).
+    let governor_conf_cleanup = Arc::clone(&governor_conf);
+    let auth_governor_conf_cleanup = Arc::clone(&auth_governor_conf);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            governor_conf_cleanup.limiter().retain_recent();
+            auth_governor_conf_cleanup.limiter().retain_recent();
+        }
+    });
 
     // /api/auth subrouter — stricter rate limiting to prevent brute-force attacks
     let auth_api_router = routes::auth_router()
@@ -205,6 +239,7 @@ async fn main() -> Result<()> {
     let ws_router = ws::router(ws_broadcaster);
 
     let app = Router::new()
+        .route("/health", get(health_handler))
         .nest("/api/auth", auth_api_router)
         .nest("/api", api_router)
         .merge(ws_router)
@@ -221,6 +256,8 @@ async fn main() -> Result<()> {
                 ),
         )
         .layer(axum::middleware::from_fn(log_rate_limited))
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(build_cors_layer(frontend_url.as_deref()))
         .with_state(state);
 
@@ -272,9 +309,28 @@ async fn log_rate_limited(
 }
 
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install CTRL+C handler");
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install CTRL+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
     tracing::info!("shutdown signal received");
 }
 
@@ -283,13 +339,21 @@ async fn shutdown_signal() {
 /// Otherwise, allows any origin (development mode).
 fn build_cors_layer(frontend_url: Option<&str>) -> CorsLayer {
     let mut cors = CorsLayer::new()
-        .allow_methods(Any)
-        .allow_headers(Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE])
         .expose_headers([
             axum::http::header::ETAG,
             axum::http::header::CACHE_CONTROL,
-        ]);
-    
+        ])
+        .max_age(Duration::from_secs(3600));
+
     if let Some(origin) = frontend_url {
         // Production: restrict to specific frontend origin
         // Note: We don't allow credentials for CORS - cookies are SameSite=Strict

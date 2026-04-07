@@ -12,7 +12,7 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{errors::AppError, routes::auth, AppState};
+use crate::{errors::AppError, routes::auth::AuthenticatedUser, AppState};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -213,11 +213,11 @@ async fn get_portfolio(
 
 /// GET /api/portfolio/mine — authenticated; private cache (10 min) + ETag revalidation
 async fn get_my_portfolio(
+    AuthenticatedUser(profile): AuthenticatedUser,
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<PortfolioQuery>,
 ) -> Result<Response, AppError> {
-    let profile = auth::authenticate(&headers, &state).await?;
     let wallets = state
         .db
         .get_profile_wallets(profile.id)
