@@ -286,7 +286,12 @@ async fn get_portfolio_by_profile_id(
         .map_err(AppError::Internal)?;
 
     let addresses: Vec<String> = wallets.iter().map(|w| w.ordinals_address.clone()).collect();
-    let address_counts = fetch_address_counts(&state, &addresses).await?;
+    let etag_addresses: Vec<String> = if let Some(ref wallet) = query.wallet {
+        addresses.iter().filter(|a| *a == wallet).cloned().collect()
+    } else {
+        addresses.clone()
+    };
+    let address_counts = fetch_address_counts(&state, &etag_addresses).await?;
     let etag = profile_etag(&address_counts, &query);
 
     if etag_matches(&headers, &etag) {
@@ -374,7 +379,18 @@ async fn run_multi_portfolio(
     let limit = limit.clamp(1, 50) as i64;
     let offset = page as i64 * limit;
 
-    let futs: Vec<_> = addresses
+    // If a wallet filter is set, only fetch from that one address
+    let addresses_to_fetch: &[String] = if let Some(wallet) = wallet_filter {
+        if let Some(pos) = addresses.iter().position(|a| a == wallet) {
+            &addresses[pos..=pos]
+        } else {
+            return Ok((vec![], vec![], 0, page, false));
+        }
+    } else {
+        addresses
+    };
+
+    let futs: Vec<_> = addresses_to_fetch
         .iter()
         .map(|addr| {
             let client = state.ord_client.clone();
