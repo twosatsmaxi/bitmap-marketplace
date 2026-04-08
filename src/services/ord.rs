@@ -24,6 +24,10 @@ pub struct OrdInscription {
     pub genesis_timestamp: Option<i64>,
     /// Output value of the UTXO holding the inscription.
     pub value: Option<u64>,
+    /// The satpoint where this inscription currently sits: "txid:vout:offset"
+    pub satpoint: Option<String>,
+    /// The output holding this inscription: "txid:vout"
+    pub output: Option<String>,
     /// Number of child inscriptions.
     #[serde(default)]
     pub child_count: u64,

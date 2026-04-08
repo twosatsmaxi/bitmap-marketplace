@@ -40,6 +40,7 @@ fn map_spendable_input(input: &SpendableInputRequest) -> SpendableInput {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_listings).post(create_listing))
+        .route("/prepare", get(prepare_listing))
         .route("/import", post(import_listings))
         .route("/:id", get(get_listing).delete(cancel_listing))
         .route("/:id/confirm", post(confirm_listing))
@@ -142,6 +143,83 @@ mod tests {
         assert!(pagination.limit.is_none());
         assert!(pagination.offset.is_none());
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct PrepareQuery {
+    inscription_id: String,
+}
+
+/// GET /prepare?inscription_id=...
+/// Looks up an inscription's current UTXO via ord and Bitcoin RPC.
+/// Returns the SpendableInput data the frontend needs for listing creation.
+async fn prepare_listing(
+    State(state): State<AppState>,
+    Query(query): Query<PrepareQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    let inscription = state
+        .ord_client
+        .get_inscription(&query.inscription_id)
+        .await
+        .map_err(AppError::Internal)?;
+
+    // Extract txid:vout from satpoint ("txid:vout:offset") or output ("txid:vout")
+    let (txid, vout) = if let Some(ref satpoint) = inscription.satpoint {
+        // satpoint format: "txid:vout:offset"
+        let parts: Vec<&str> = satpoint.split(':').collect();
+        if parts.len() < 2 {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "invalid satpoint format: {}",
+                satpoint
+            )));
+        }
+        (
+            parts[0].to_string(),
+            parts[1].parse::<u32>().map_err(|_| {
+                AppError::Internal(anyhow::anyhow!("invalid vout in satpoint: {}", satpoint))
+            })?,
+        )
+    } else if let Some(ref output) = inscription.output {
+        // output format: "txid:vout"
+        let parts: Vec<&str> = output.split(':').collect();
+        if parts.len() != 2 {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "invalid output format: {}",
+                output
+            )));
+        }
+        (
+            parts[0].to_string(),
+            parts[1].parse::<u32>().map_err(|_| {
+                AppError::Internal(anyhow::anyhow!("invalid vout in output: {}", output))
+            })?,
+        )
+    } else {
+        return Err(AppError::BadRequest(
+            "inscription has no satpoint or output data — it may be unconfirmed".to_string(),
+        ));
+    };
+
+    // Verify the UTXO is unspent and get script_pubkey via Bitcoin RPC
+    let rpc = crate::services::bitcoin_rpc::BitcoinRpc::new().map_err(AppError::Internal)?;
+    let utxo = rpc
+        .get_utxo_info(&txid, vout)
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| {
+            AppError::Conflict(format!(
+                "UTXO {}:{} is already spent — the inscription may have moved",
+                txid, vout
+            ))
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "inscription_id": query.inscription_id,
+        "txid": txid,
+        "vout": vout,
+        "value_sats": utxo.amount_sats,
+        "script_pubkey_hex": utxo.script_pubkey,
+        "owner_address": utxo.address,
+    })))
 }
 
 async fn create_listing(
@@ -395,6 +473,13 @@ async fn import_listings(
     State(state): State<AppState>,
     Json(req): Json<ImportListingsRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
+    // Magic Eden API is mainnet-only
+    if state.network != bitcoin::Network::Bitcoin {
+        return Err(AppError::BadRequest(
+            "Magic Eden import is only available on mainnet".to_string(),
+        ));
+    }
+
     let me_listings = magic_eden::fetch_listings_by_seller(&state.http_client, &req.seller_address)
         .await
         .map_err(AppError::Internal)?;
