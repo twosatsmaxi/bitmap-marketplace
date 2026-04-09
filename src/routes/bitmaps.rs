@@ -3,14 +3,17 @@ use crate::{
     AppState,
 };
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::get,
     Json, Router,
 };
-use serde::Serialize;
+use futures::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/:block_height/details", get(get_bitmap_details))
+    Router::new()
+        .route("/:block_height/details", get(get_bitmap_details))
+        .route("/:block_height/children", get(get_bitmap_children))
 }
 
 #[derive(Serialize)]
@@ -22,6 +25,86 @@ struct BitmapDetailsResponse {
     children_count: usize,
     children: Vec<String>,
     genesis_height: i64,
+}
+
+#[derive(Deserialize)]
+struct ChildrenQuery {
+    #[serde(default)]
+    page: u64,
+    #[serde(default = "default_children_limit")]
+    limit: u64,
+}
+
+fn default_children_limit() -> u64 {
+    20
+}
+
+#[derive(Serialize)]
+struct BitmapChildrenResponse {
+    block_height: i64,
+    parent_inscription_id: String,
+    total_children: u64,
+    page: u64,
+    children: Vec<crate::services::ord::OrdInscription>,
+    has_more: bool,
+}
+
+async fn get_bitmap_children(
+    State(state): State<AppState>,
+    Path(block_height): Path<i64>,
+    Query(query): Query<ChildrenQuery>,
+) -> AppResult<Json<BitmapChildrenResponse>> {
+    let bitmap = state
+        .db
+        .get_bitmap_by_height(block_height)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound(format!("Bitmap not found for block {}", block_height)))?;
+
+    let inscription_id = bitmap
+        .inscription_id
+        .ok_or_else(|| AppError::NotFound(format!("No inscription for block {}", block_height)))?;
+
+    let ord_inscription = state
+        .ord_client
+        .get_inscription(&inscription_id)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+
+    let total_children = ord_inscription.child_count;
+    let limit = query.limit.clamp(1, 50);
+    let offset = query.page * limit;
+
+    let indices: Vec<u64> = (offset..total_children.min(offset + limit)).collect();
+    let has_more = offset + limit < total_children;
+
+    let futs: Vec<_> = indices
+        .into_iter()
+        .map(|child_index| {
+            let client = state.ord_client.clone();
+            let id = inscription_id.clone();
+            async move {
+                client.get_child_inscription(&id, child_index).await
+            }
+        })
+        .collect();
+
+    let children: Vec<crate::services::ord::OrdInscription> = stream::iter(futs)
+        .buffer_unordered(10)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::Internal)?;
+
+    Ok(Json(BitmapChildrenResponse {
+        block_height,
+        parent_inscription_id: inscription_id,
+        total_children,
+        page: query.page,
+        children,
+        has_more,
+    }))
 }
 
 async fn get_bitmap_details(

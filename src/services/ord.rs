@@ -1,14 +1,14 @@
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Response structs
 // ---------------------------------------------------------------------------
 
 /// A single inscription as returned by GET /inscription/{id}
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OrdInscription {
     pub id: String,
     pub number: i64,
@@ -233,6 +233,18 @@ impl OrdClient {
             .get_json::<OrdAddressResponse>(&format!("/address/{address}"))
             .await?;
         Ok(resp.inscriptions)
+    }
+
+    /// Fetch a child inscription by parent ID and child index.
+    ///
+    /// Calls `GET /inscription/{id}/{child_index}`.
+    pub async fn get_child_inscription(
+        &self,
+        parent_id: &str,
+        child_index: u64,
+    ) -> Result<OrdInscription> {
+        self.get_json::<OrdInscription>(&format!("/inscription/{parent_id}/{child_index}"))
+            .await
     }
 
     /// Fetch sat metadata by sat number.
