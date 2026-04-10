@@ -262,4 +262,26 @@ impl Database {
         };
         Ok(count)
     }
+
+    /// Get just block heights for a set of inscription IDs (lightweight for bitfield)
+    pub async fn get_block_heights_by_inscription_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<i64>> {
+        let heights: Vec<i64> = sqlx::query_scalar(
+            "SELECT block_height FROM bitmaps WHERE inscription_id = ANY($1) ORDER BY block_height ASC"
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(heights)
+    }
+
+    /// Get the maximum block height across all bitmaps (for total grid extent)
+    pub async fn get_max_block_height(&self) -> Result<i64> {
+        let max: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(block_height), 0) FROM bitmaps")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(max)
+    }
 }

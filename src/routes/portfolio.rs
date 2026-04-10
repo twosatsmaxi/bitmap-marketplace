@@ -1,4 +1,5 @@
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
     http::{
         header::{CACHE_CONTROL, ETAG, IF_NONE_MATCH},
@@ -17,7 +18,10 @@ use crate::{errors::AppError, routes::auth::AuthenticatedUser, AppState};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/mine", get(get_my_portfolio))
+        .route("/mine/bitfield", get(get_my_bitfield))
         .route("/profile/:profile_id", get(get_portfolio_by_profile_id))
+        .route("/profile/:profile_id/bitfield", get(get_profile_bitfield))
+        .route("/:address/bitfield", get(get_portfolio_bitfield))
         .route("/:address", get(get_portfolio))
 }
 
@@ -481,4 +485,116 @@ async fn run_multi_portfolio(
         .collect();
 
     Ok((items, trait_stats, total, page, has_more))
+}
+
+// ---------------------------------------------------------------------------
+// Bitfield endpoints
+// ---------------------------------------------------------------------------
+
+fn bitfield_response(bitfield: Vec<u8>, total_blocks: usize, owned_count: usize, cache_control: &'static str) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", HeaderValue::from_static("application/octet-stream"));
+    headers.insert("x-total-blocks", HeaderValue::from_str(&total_blocks.to_string()).unwrap());
+    headers.insert("x-owned-count", HeaderValue::from_str(&owned_count.to_string()).unwrap());
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static(cache_control));
+    (StatusCode::OK, headers, Body::from(bitfield)).into_response()
+}
+
+async fn build_bitfield(
+    state: &AppState,
+    addresses: &[String],
+) -> Result<(Vec<u8>, usize, usize), AppError> {
+    // Gather inscription IDs across all addresses in parallel
+    let futs: Vec<_> = addresses
+        .iter()
+        .map(|addr| {
+            let client = state.ord_client.clone();
+            let addr = addr.clone();
+            async move { client.get_address_inscription_ids(&addr).await }
+        })
+        .collect();
+
+    let results: Vec<_> = stream::iter(futs)
+        .buffer_unordered(10)
+        .collect()
+        .await;
+
+    let mut all_inscription_ids: Vec<String> = Vec::new();
+    for result in results {
+        let ids = result.map_err(AppError::Internal)?;
+        all_inscription_ids.extend(ids);
+    }
+    all_inscription_ids.sort_unstable();
+    all_inscription_ids.dedup();
+
+    if all_inscription_ids.is_empty() {
+        return Ok((vec![], 0, 0));
+    }
+
+    let heights = state
+        .db
+        .get_block_heights_by_inscription_ids(&all_inscription_ids)
+        .await
+        .map_err(AppError::Internal)?;
+
+    let max_height = state
+        .db
+        .get_max_block_height()
+        .await
+        .map_err(AppError::Internal)?;
+    let total_blocks = (max_height + 1) as usize;
+
+    let byte_count = (total_blocks + 7) / 8;
+    let mut bitfield = vec![0u8; byte_count];
+    for &h in &heights {
+        let h = h as usize;
+        if h < total_blocks {
+            bitfield[h >> 3] |= 1 << (h & 7);
+        }
+    }
+
+    Ok((bitfield, total_blocks, heights.len()))
+}
+
+async fn get_portfolio_bitfield(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> Result<Response, AppError> {
+    let (bitfield, total, owned) = build_bitfield(&state, &[address]).await?;
+    Ok(bitfield_response(bitfield, total, owned, "public, max-age=60, stale-while-revalidate=30"))
+}
+
+async fn get_profile_bitfield(
+    State(state): State<AppState>,
+    Path(profile_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    state
+        .db
+        .get_profile_by_id(profile_id)
+        .await
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
+
+    let wallets = state
+        .db
+        .get_profile_wallets(profile_id)
+        .await
+        .map_err(AppError::Internal)?;
+    let addresses: Vec<String> = wallets.iter().map(|w| w.ordinals_address.clone()).collect();
+    let (bitfield, total, owned) = build_bitfield(&state, &addresses).await?;
+    Ok(bitfield_response(bitfield, total, owned, CACHE_PUBLIC))
+}
+
+async fn get_my_bitfield(
+    AuthenticatedUser(profile): AuthenticatedUser,
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
+    let wallets = state
+        .db
+        .get_profile_wallets(profile.id)
+        .await
+        .map_err(AppError::Internal)?;
+    let addresses: Vec<String> = wallets.iter().map(|w| w.ordinals_address.clone()).collect();
+    let (bitfield, total, owned) = build_bitfield(&state, &addresses).await?;
+    Ok(bitfield_response(bitfield, total, owned, CACHE_PRIVATE))
 }
