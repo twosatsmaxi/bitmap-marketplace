@@ -210,7 +210,7 @@ async fn test_unprotected_buy_flow() {
 #[ignore]
 #[serial]
 async fn test_protected_buy_flow() {
-    use bitcoin::secp256k1::{self, Secp256k1, SecretKey};
+    use bitcoin::secp256k1::{self, Secp256k1};
     use bitcoin::sighash::SighashCache;
 
     let infra = TestInfra::start().await;
@@ -236,13 +236,12 @@ async fn test_protected_buy_flow() {
 
     let price_sats: i64 = 50_000;
 
-    // Seller keypair — we need the secret key for manual signing of the sale template.
-    // Use a fixed test key distinct from the marketplace key.
+    // Fixed test key distinct from the marketplace key ([0x01; 32]).
     let secp = Secp256k1::new();
-    let seller_secret = SecretKey::from_slice(&[0x02u8; 32]).unwrap();
+    let seller_keypair = secp256k1::Keypair::from_seckey_slice(&secp, &[0x02u8; 32]).unwrap();
     let seller_pubkey = bitcoin::PublicKey {
         compressed: true,
-        inner: secp256k1::PublicKey::from_secret_key(&secp, &seller_secret),
+        inner: seller_keypair.public_key(),
     };
 
     // --- Create protected listing via API ---
@@ -284,18 +283,12 @@ async fn test_protected_buy_flow() {
     let signed_locking_hex = psbt_base64_to_hex(&signed_locking_b64);
 
     // --- Seller signs the sale template PSBT ---
-    // Signs with SIGHASH_SINGLE|ANYONECANPAY via Taproot script-path (Schnorr).
-    // The sale template input spends the Taproot multisig locking output, so we
-    // compute a taproot_script_spend_signature_hash and sign with sign_schnorr.
     let mut sale_template_psbt =
         bitmap_marketplace::services::psbt::decode_psbt(sale_template_psbt_hex)
             .expect("failed to decode sale template PSBT");
 
-    let seller_keypair = secp256k1::Keypair::from_secret_key(&secp, &seller_secret);
     let (seller_xonly, _) = secp256k1::XOnlyPublicKey::from_keypair(&seller_keypair);
-
-    // Get the leaf script and compute leaf hash from the PSBT's tap_scripts metadata.
-    let (leaf_script, _leaf_version) = sale_template_psbt.inputs[0]
+    let (leaf_script, _) = sale_template_psbt.inputs[0]
         .tap_scripts
         .values()
         .next()
@@ -303,26 +296,22 @@ async fn test_protected_buy_flow() {
         .clone();
     let leaf_hash =
         bitcoin::taproot::TapLeafHash::from_script(&leaf_script, bitcoin::taproot::LeafVersion::TapScript);
-
-    // The sale template has 1 input; prevouts must include its witness_utxo.
     let witness_utxo = sale_template_psbt.inputs[0]
         .witness_utxo
-        .clone()
+        .as_ref()
         .expect("sale template missing witness_utxo");
-    let prevouts = vec![witness_utxo];
 
     let sighash = SighashCache::new(&sale_template_psbt.unsigned_tx)
         .taproot_script_spend_signature_hash(
             0,
-            &bitcoin::sighash::Prevouts::All(&prevouts),
+            &bitcoin::sighash::Prevouts::One(0, witness_utxo),
             leaf_hash,
             bitcoin::sighash::TapSighashType::SinglePlusAnyoneCanPay,
         )
         .expect("taproot sighash computation failed");
 
     let schnorr_sig = secp.sign_schnorr(
-        &secp256k1::Message::from_digest_slice(sighash.as_ref())
-            .expect("sighash must be 32 bytes"),
+        &secp256k1::Message::from_digest_slice(sighash.as_ref()).unwrap(),
         &seller_keypair,
     );
     sale_template_psbt.inputs[0].tap_script_sigs.insert(
