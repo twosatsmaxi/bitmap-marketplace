@@ -1,7 +1,8 @@
 use crate::{
+    db::Database,
     errors::{AppError, AppResult},
     models::activity::{Activity, ActivityType},
-    models::listing::{BuyListingRequest, SpendableInputRequest},
+    models::listing::BuyListingRequest,
     models::sale::Sale,
     services::psbt::{
         apply_marketplace_signature, build_buy_psbt, build_protected_sale_psbt,
@@ -18,22 +19,6 @@ use axum::{
 };
 use serde::Deserialize;
 use uuid::Uuid;
-
-fn map_spendable_input(input: &SpendableInputRequest) -> SpendableInput {
-    SpendableInput {
-        txid: input.txid.clone(),
-        vout: input.vout,
-        value_sats: input.value_sats,
-        witness_utxo: WitnessUtxo {
-            script_pubkey_hex: input.witness_utxo.script_pubkey_hex.clone(),
-            value_sats: input.witness_utxo.value_sats,
-        },
-        non_witness_utxo_hex: input.non_witness_utxo_hex.clone(),
-        redeem_script_hex: input.redeem_script_hex.clone(),
-        witness_script_hex: input.witness_script_hex.clone(),
-        sequence: input.sequence,
-    }
-}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -92,7 +77,7 @@ async fn buy(
             seller_pubkey_hex: seller_pubkey,
             price_sats: listing.price_sats as u64,
             buyer_address: req.buyer_address.clone(),
-            buyer_funding_input: map_spendable_input(buyer_funding_input),
+            buyer_funding_input: SpendableInput::from(buyer_funding_input),
             fee_rate_sat_vb: req.fee_rate_sat_vb.unwrap_or(5.0),
             marketplace_fee_address: state.marketplace_fee_address.clone(),
             marketplace_fee_bps: state.marketplace_fee_bps,
@@ -118,7 +103,7 @@ async fn buy(
     let buy_req = BuyRequest {
         seller_psbt_hex,
         buyer_address: req.buyer_address.clone(),
-        buyer_funding_input: map_spendable_input(
+        buyer_funding_input: SpendableInput::from(
             req.buyer_funding_input
                 .as_ref()
                 .ok_or_else(|| AppError::BadRequest("buyer_funding_input required".to_string()))?,
@@ -129,21 +114,6 @@ async fn buy(
     };
 
     let result = build_buy_psbt(&buy_req).map_err(|e| AppError::Internal(e))?;
-
-    // Insert Activity
-    let activity = Activity {
-        id: Uuid::new_v4(),
-        inscription_id: listing.inscription_id.clone(),
-        collection_id: None,
-        activity_type: ActivityType::Sale,
-        from_address: Some(listing.seller_address.clone()),
-        to_address: Some(req.buyer_address.clone()),
-        price_sats: Some(listing.price_sats),
-        tx_id: None,
-        block_height: None,
-        created_at: chrono::Utc::now(),
-    };
-    let _ = state.db.create_activity(&activity).await;
 
     Ok(Json(serde_json::json!({
         "psbt": result.psbt_hex,
@@ -204,9 +174,11 @@ async fn confirm_order(
         )
         .map_err(|e| AppError::Internal(e))?;
 
-        rpc.verify_locking_tx_inputs_unspent(&locking_raw_tx)
+        // Pre-broadcast UTXO liveness check: verify locking tx inputs are still unspent.
+        rpc.verify_inputs_unspent(&locking_raw_tx)
             .map_err(|e| AppError::Conflict(e.to_string()))?;
 
+        // Package broadcast: [locking_tx, sale_tx].
         let txids = rpc
             .submit_package(&[&locking_raw_tx, &sale_raw_tx])
             .map_err(|e| AppError::Internal(e))?;
@@ -245,24 +217,9 @@ async fn confirm_order(
             confirmed_at: None,
             created_at: chrono::Utc::now(),
         };
-        sqlx::query(
-            r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, marketplace_fee_sats, tx_id, locking_tx_id, block_height, confirmed_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
-        )
-        .bind(sale.id)
-        .bind(sale.listing_id)
-        .bind(&sale.inscription_id)
-        .bind(&sale.seller_address)
-        .bind(&sale.buyer_address)
-        .bind(sale.price_sats)
-        .bind(sale.marketplace_fee_sats)
-        .bind(&sale.tx_id)
-        .bind(&sale.locking_tx_id)
-        .bind(sale.block_height)
-        .bind(sale.confirmed_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
+        Database::create_sale_in_tx(&mut *tx, &sale)
+            .await
+            .map_err(AppError::Internal)?;
 
         sqlx::query(
             "UPDATE inscriptions SET owner_address = $1, updated_at = NOW() WHERE inscription_id = $2",
@@ -321,24 +278,9 @@ async fn confirm_order(
         confirmed_at: None,
         created_at: chrono::Utc::now(),
     };
-    sqlx::query(
-        r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, marketplace_fee_sats, tx_id, locking_tx_id, block_height, confirmed_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
-    )
-    .bind(sale.id)
-    .bind(sale.listing_id)
-    .bind(&sale.inscription_id)
-    .bind(&sale.seller_address)
-    .bind(&sale.buyer_address)
-    .bind(sale.price_sats)
-    .bind(sale.marketplace_fee_sats)
-    .bind(&sale.tx_id)
-    .bind(&sale.locking_tx_id)
-    .bind(sale.block_height)
-    .bind(sale.confirmed_at)
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
+    Database::create_sale_in_tx(&mut *tx, &sale)
+        .await
+        .map_err(AppError::Internal)?;
 
     sqlx::query(
         "UPDATE inscriptions SET owner_address = $1, updated_at = NOW() WHERE inscription_id = $2",
@@ -350,6 +292,21 @@ async fn confirm_order(
     .map_err(AppError::Database)?;
 
     tx.commit().await.map_err(AppError::Database)?;
+
+    // Record activity at confirmation time (not at PSBT build time).
+    let activity = Activity {
+        id: Uuid::new_v4(),
+        inscription_id: listing.inscription_id.clone(),
+        collection_id: None,
+        activity_type: ActivityType::Sale,
+        from_address: Some(listing.seller_address.clone()),
+        to_address: Some(buyer_address.clone()),
+        price_sats: Some(listing.price_sats),
+        tx_id: Some(tx_id.clone()),
+        block_height: None,
+        created_at: chrono::Utc::now(),
+    };
+    let _ = state.db.create_activity(&activity).await;
 
     state.ws_broadcaster.send(WsEvent::SaleConfirmed {
         inscription_id: listing.inscription_id.clone(),

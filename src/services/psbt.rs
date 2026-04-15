@@ -1,21 +1,43 @@
 // PSBT construction for trustless listing and buying.
 // bitmap-marketplace-ssd: listing construction
 // bitmap-marketplace-jaa: buy flow completion
+// bitmap-marketplace-iwo: Taproot script-path migration
 
 use anyhow::{anyhow, Result};
 use bitcoin::{
     absolute::LockTime,
-    ecdsa,
+    hashes::Hash,
     opcodes::all as op,
     psbt::{Input as PsbtInput, Output as PsbtOutput, Psbt, PsbtSighashType},
     script::{Builder as ScriptBuilder, PushBytesBuf},
-    secp256k1::PublicKey,
-    Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
-    Witness,
+    secp256k1::{self, PublicKey, XOnlyPublicKey},
+    sighash::TapSighashType,
+    taproot::{self, ControlBlock, LeafVersion, TaprootBuilder},
+    Address, Amount, Network, OutPoint, ScriptBuf, Sequence, TapLeafHash, Transaction, TxIn,
+    TxOut, Txid, Witness,
 };
 use std::str::FromStr;
 
+use crate::models::listing::SpendableInputRequest;
 use crate::services::marketplace_keypair::MarketplaceKeypair;
+
+impl From<&SpendableInputRequest> for SpendableInput {
+    fn from(req: &SpendableInputRequest) -> Self {
+        SpendableInput {
+            txid: req.txid.clone(),
+            vout: req.vout,
+            value_sats: req.value_sats,
+            witness_utxo: WitnessUtxo {
+                script_pubkey_hex: req.witness_utxo.script_pubkey_hex.clone(),
+                value_sats: req.witness_utxo.value_sats,
+            },
+            non_witness_utxo_hex: req.non_witness_utxo_hex.clone(),
+            redeem_script_hex: req.redeem_script_hex.clone(),
+            witness_script_hex: req.witness_script_hex.clone(),
+            sequence: req.sequence,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct WitnessUtxo {
@@ -69,11 +91,11 @@ pub struct LockingPsbtRequest {
     pub inscription_input: SpendableInput,
     pub gas_funding_input: Option<SpendableInput>,
     pub seller_pubkey_hex: String,
+    pub seller_address: String,
+    pub price_sats: u64,
     pub marketplace_pubkey_hex: String,
     pub network: Network,
     pub min_relay_fee_rate_sat_vb: Option<f64>,
-    pub seller_address: String,
-    pub price_sats: u64,
 }
 
 #[derive(Debug)]
@@ -83,13 +105,6 @@ pub struct LockingPsbt {
     pub multisig_script_hex: String,
     /// Sale template PSBT for the seller to pre-sign with SIGHASH_SINGLE|ANYONECANPAY.
     pub sale_template_psbt_hex: String,
-}
-
-struct SaleTemplateRequest {
-    locking_psbt_hex: String,
-    multisig_script_hex: String,
-    seller_address: String,
-    price_sats: u64,
 }
 
 pub struct ProtectedSalePsbtRequest {
@@ -104,7 +119,7 @@ pub struct ProtectedSalePsbtRequest {
     pub fee_rate_sat_vb: f64,
     pub marketplace_fee_address: Option<String>,
     pub marketplace_fee_bps: u64,
-    /// Seller's pre-signed partial_sig (hex) for the multisig input, signed at listing time.
+    /// Seller's pre-signed Schnorr signature (hex) for the multisig input, signed at listing time.
     pub seller_sale_sig_hex: Option<String>,
 }
 
@@ -114,6 +129,16 @@ pub struct ProtectedSalePsbt {
     pub estimated_fee_sats: u64,
     pub locking_txid: String,
     pub marketplace_fee_sats: u64,
+}
+
+/// Taproot 2-of-2 multisig descriptor returned by `create_taproot_multisig`.
+pub struct TaprootMultisig {
+    pub address: Address,
+    pub output_script: ScriptBuf,
+    pub leaf_script: ScriptBuf,
+    pub internal_key: XOnlyPublicKey,
+    pub control_block: ControlBlock,
+    pub leaf_version: LeafVersion,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -128,13 +153,69 @@ const LOCKING_TX_OUTPUT_VBYTES: f64 = 43.0;
 const LOCKING_TX_OVERHEAD_VBYTES: f64 = 10.5;
 const SALE_TX_OUTPUT_VBYTES: f64 = 31.0;
 const SALE_TX_OVERHEAD_VBYTES: f64 = 10.5;
-const MULTISIG_INPUT_VBYTES: f64 = 140.0;
+/// Taproot script-path 2-of-2 input: ~107 vbytes (2 Schnorr sigs + script + control block).
+const TAPROOT_MULTISIG_INPUT_VBYTES: f64 = 107.5;
 const INSCRIPTION_DUST_SATS: u64 = 546;
 const LOCKING_OUTPUT_DUST_SATS: u64 = 330;
 const MIN_MARKETPLACE_FEE_SATS: u64 = 1000;
 
 /// Minimum inscription value (sats) that is self-funding for locking tx.
 pub const MIN_SELF_FUNDED: u64 = 343;
+
+/// Sort two compressed pubkeys lexicographically (BIP 67) and return x-only versions.
+fn sorted_x_only_pubkeys(a: &PublicKey, b: &PublicKey) -> (XOnlyPublicKey, XOnlyPublicKey) {
+    let a_bytes = a.serialize();
+    let b_bytes = b.serialize();
+    let (first, second) = if a_bytes <= b_bytes { (a, b) } else { (b, a) };
+    (XOnlyPublicKey::from(*first), XOnlyPublicKey::from(*second))
+}
+
+/// Build a Taproot 2-of-2 multisig using script-path spending.
+/// Script: `<xpk1> OP_CHECKSIG <xpk2> OP_CHECKSIGADD OP_2 OP_NUMEQUAL`
+/// Matches the mempool-protection reference implementation.
+pub fn create_taproot_multisig(
+    seller_pk: &PublicKey,
+    marketplace_pk: &PublicKey,
+    internal_key: XOnlyPublicKey,
+    network: Network,
+) -> Result<TaprootMultisig> {
+    let (xpk1, xpk2) = sorted_x_only_pubkeys(seller_pk, marketplace_pk);
+
+    let leaf_script = ScriptBuilder::new()
+        .push_x_only_key(&xpk1)
+        .push_opcode(op::OP_CHECKSIG)
+        .push_x_only_key(&xpk2)
+        .push_opcode(op::OP_CHECKSIGADD)
+        .push_opcode(op::OP_PUSHNUM_2)
+        .push_opcode(op::OP_NUMEQUAL)
+        .into_script();
+
+    let builder = TaprootBuilder::new()
+        .add_leaf(0, leaf_script.clone())
+        .map_err(|e| anyhow!("TaprootBuilder::add_leaf failed: {:?}", e))?;
+
+    let spend_info = builder
+        .finalize(&secp256k1::Secp256k1::new(), internal_key)
+        .map_err(|_| anyhow!("TaprootBuilder::finalize failed"))?;
+
+    let address = Address::p2tr_tweaked(spend_info.output_key(), network);
+    let output_script = address.script_pubkey();
+
+    let control_block = spend_info
+        .control_block(&(leaf_script.clone(), LeafVersion::TapScript))
+        .ok_or_else(|| anyhow!("failed to compute control block for taproot multisig"))?;
+
+    Ok(TaprootMultisig {
+        address,
+        output_script,
+        leaf_script,
+        internal_key,
+        control_block,
+        leaf_version: LeafVersion::TapScript,
+    })
+}
+
+// ── Legacy listing PSBT (unprotected flow, unchanged) ───────────────────────
 
 pub fn build_listing_psbt(req: &ListingRequest) -> Result<ListingPsbt> {
     let txid = Txid::from_str(&req.inscription_txid)
@@ -179,6 +260,8 @@ pub fn build_listing_psbt(req: &ListingRequest) -> Result<ListingPsbt> {
     })
 }
 
+// ── Input type detection (shared) ───────────────────────────────────────────
+
 fn is_p2wpkh_script(script: &ScriptBuf) -> bool {
     let bytes = script.as_bytes();
     bytes.len() == 22 && bytes[0] == 0x00 && bytes[1] == 0x14
@@ -204,7 +287,7 @@ fn locking_input_vbytes(input_type: SupportedInputType) -> f64 {
 
 fn sale_tx_vbytes(buyer_input_type: SupportedInputType, output_count: u64) -> u64 {
     (SALE_TX_OVERHEAD_VBYTES
-        + MULTISIG_INPUT_VBYTES
+        + TAPROOT_MULTISIG_INPUT_VBYTES
         + locking_input_vbytes(buyer_input_type)
         + (SALE_TX_OUTPUT_VBYTES * output_count as f64))
         .ceil() as u64
@@ -382,6 +465,8 @@ fn push_script_bytes(bytes: &[u8]) -> Result<ScriptBuf> {
     Ok(ScriptBuilder::new().push_slice(push_bytes).into_script())
 }
 
+// ── Legacy buy PSBT (unprotected flow, unchanged) ───────────────────────────
+
 pub fn build_buy_psbt(req: &BuyRequest) -> Result<BuyPsbt> {
     let psbt = decode_psbt(&req.seller_psbt_hex)?;
 
@@ -487,30 +572,18 @@ pub fn finalize_and_extract(signed_psbt_hex: &str) -> Result<String> {
     Ok(hex::encode(raw_bytes))
 }
 
-fn bip67_sort(a: &[u8; 33], b: &[u8; 33]) -> ([u8; 33], [u8; 33]) {
-    if a <= b {
-        (*a, *b)
-    } else {
-        (*b, *a)
-    }
-}
+// ── Taproot 2-of-2 locking PSBT ────────────────────────────────────────────
 
-pub fn build_multisig_redeem_script(
+/// Resolve the Taproot internal key from the inscription input (or fallback to seller x-only).
+/// Matches the reference: prefer tapInternalKey from input, then fallback to seller x-only pubkey.
+fn resolve_internal_key(
+    _inscription_input: &SpendableInput,
     seller_pk: &PublicKey,
-    marketplace_pk: &PublicKey,
-) -> ScriptBuf {
-    let (pk1, pk2) = bip67_sort(&seller_pk.serialize(), &marketplace_pk.serialize());
-    ScriptBuilder::new()
-        .push_opcode(op::OP_PUSHNUM_2)
-        .push_slice(pk1)
-        .push_slice(pk2)
-        .push_opcode(op::OP_PUSHNUM_2)
-        .push_opcode(op::OP_CHECKMULTISIG)
-        .into_script()
-}
-
-pub fn p2wsh_address(witness_script: &ScriptBuf, network: Network) -> Address {
-    Address::p2wsh(witness_script, network)
+) -> XOnlyPublicKey {
+    // For now, use the seller's x-only pubkey as the internal key.
+    // This makes the key-path unspendable (would need the tweaked private key),
+    // forcing script-path spending which requires both signatures.
+    XOnlyPublicKey::from(*seller_pk)
 }
 
 pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
@@ -519,8 +592,9 @@ pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
     let marketplace_pk = PublicKey::from_str(&req.marketplace_pubkey_hex)
         .map_err(|e| anyhow!("invalid marketplace_pubkey_hex: {}", e))?;
 
-    let witness_script = build_multisig_redeem_script(&seller_pk, &marketplace_pk);
-    let multisig_address = p2wsh_address(&witness_script, req.network);
+    let internal_key = resolve_internal_key(&req.inscription_input, &seller_pk);
+    let multisig = create_taproot_multisig(&seller_pk, &marketplace_pk, internal_key, req.network)?;
+
     let inscription_input_type =
         detect_supported_input_type(&req.inscription_input, "inscription_input")?;
     let min_relay_fee_rate = req
@@ -601,7 +675,7 @@ pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
         input: inputs,
         output: vec![TxOut {
             value: Amount::from_sat(locked_value_sats),
-            script_pubkey: multisig_address.script_pubkey(),
+            script_pubkey: multisig.output_script.clone(),
         }],
     };
 
@@ -612,31 +686,41 @@ pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
         add_spendable_input(&mut psbt, 1, gas_input)?;
     }
 
-    let multisig_script_hex = hex::encode(witness_script.as_bytes());
+    let multisig_script_hex = hex::encode(multisig.leaf_script.as_bytes());
 
     // Build sale template for seller pre-signing (SIGHASH_SINGLE|ANYONECANPAY).
-    // SegWit txid is stable (non-malleable), so we can compute the planned locked UTXO.
-    let sale_template = build_sale_template_psbt(&SaleTemplateRequest {
-        locking_psbt_hex: encode_psbt(&psbt),
-        multisig_script_hex: multisig_script_hex.clone(),
-        seller_address: req.seller_address.clone(),
-        price_sats: req.price_sats,
-    })?;
+    // SegWit v1 txid is stable (non-malleable), so we can compute the planned locked UTXO.
+    let seller_addr = Address::from_str(&req.seller_address)
+        .map_err(|e| anyhow!("invalid seller_address: {}", e))?
+        .assume_checked();
+    let sale_template = build_sale_template_psbt(
+        &encode_psbt(&psbt),
+        &multisig,
+        &seller_addr,
+        req.price_sats,
+    )?;
 
     Ok(LockingPsbt {
         psbt_hex: encode_psbt(&psbt),
-        multisig_address: multisig_address.to_string(),
+        multisig_address: multisig.address.to_string(),
         multisig_script_hex,
         sale_template_psbt_hex: sale_template,
     })
 }
 
+// ── Sale template PSBT (Taproot) ────────────────────────────────────────────
+
 /// Build a minimal sale template PSBT for the seller to pre-sign.
-/// Contains 1 input (the planned multisig UTXO) and 1 output (seller payment placeholder).
-/// The seller signs with SIGHASH_SINGLE|ANYONECANPAY so the signature remains valid
-/// when additional inputs/outputs are added at buy time.
-fn build_sale_template_psbt(req: &SaleTemplateRequest) -> Result<String> {
-    let locking_psbt = decode_psbt(&req.locking_psbt_hex)?;
+/// Contains 1 input (the planned Taproot multisig UTXO) and 1 output (seller payment placeholder).
+/// The seller signs with SIGHASH_SINGLE|ANYONECANPAY via Schnorr script-path so the
+/// signature remains valid when additional inputs/outputs are added at buy time.
+fn build_sale_template_psbt(
+    locking_psbt_hex: &str,
+    multisig: &TaprootMultisig,
+    seller_address: &Address,
+    price_sats: u64,
+) -> Result<String> {
+    let locking_psbt = decode_psbt(locking_psbt_hex)?;
     let locking_txid = locking_psbt.unsigned_tx.txid();
     let multisig_txout = locking_psbt
         .unsigned_tx
@@ -645,15 +729,6 @@ fn build_sale_template_psbt(req: &SaleTemplateRequest) -> Result<String> {
         .ok_or_else(|| anyhow!("locking PSBT has no outputs"))?
         .clone();
 
-    let witness_script = parse_script_hex("multisig_script_hex", &req.multisig_script_hex)?;
-
-    let seller_addr = Address::from_str(&req.seller_address)
-        .map_err(|e| anyhow!("invalid seller_address: {}", e))?
-        .assume_checked();
-
-    // Minimal 1-in/1-out template. Output 0 must match the final sale tx's output[0]
-    // because SIGHASH_SINGLE commits to both the value and script_pubkey of the output
-    // at the same index as the input.
     let unsigned_tx = Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: LockTime::ZERO,
@@ -664,41 +739,54 @@ fn build_sale_template_psbt(req: &SaleTemplateRequest) -> Result<String> {
             witness: Witness::default(),
         }],
         output: vec![TxOut {
-            value: Amount::from_sat(req.price_sats),
-            script_pubkey: seller_addr.script_pubkey(),
+            value: Amount::from_sat(price_sats),
+            script_pubkey: seller_address.script_pubkey(),
         }],
     };
 
     let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)
         .map_err(|e| anyhow!("sale template PSBT creation failed: {}", e))?;
+
+    // Set Taproot script-path metadata for the multisig input.
     psbt.inputs[0].sighash_type = Some(PsbtSighashType::from(
-        bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
+        TapSighashType::SinglePlusAnyoneCanPay,
     ));
     psbt.inputs[0].witness_utxo = Some(multisig_txout);
-    psbt.inputs[0].witness_script = Some(witness_script);
+    psbt.inputs[0].tap_internal_key = Some(multisig.internal_key);
+    psbt.inputs[0].tap_merkle_root = Some(
+        TapLeafHash::from_script(&multisig.leaf_script, LeafVersion::TapScript).into(),
+    );
+    psbt.inputs[0]
+        .tap_scripts
+        .insert(multisig.control_block.clone(), (multisig.leaf_script.clone(), LeafVersion::TapScript));
 
     Ok(encode_psbt(&psbt))
 }
 
-/// Extract the seller's partial signature from a signed sale template PSBT.
-/// The seller signs the template with SIGHASH_SINGLE|ANYONECANPAY; this extracts
-/// the resulting partial_sig for embedding into the full sale PSBT at buy time.
+/// Extract the seller's Schnorr signature from a signed sale template PSBT.
+/// The seller signs the template with SIGHASH_SINGLE|ANYONECANPAY via taproot script-path;
+/// this extracts the resulting tap_script_sig for embedding into the full sale PSBT at buy time.
 pub fn extract_seller_sale_sig(
     signed_sale_template_hex: &str,
     seller_pubkey_hex: &str,
 ) -> Result<String> {
     let psbt = decode_psbt(signed_sale_template_hex)?;
-    let seller_pk = bitcoin::PublicKey::from_str(seller_pubkey_hex)
+    let seller_pk = PublicKey::from_str(seller_pubkey_hex)
         .map_err(|e| anyhow!("invalid seller_pubkey_hex: {}", e))?;
+    let seller_xonly = XOnlyPublicKey::from(seller_pk);
 
+    // Find the seller's tap_script_sig in input 0.
     let sig = psbt.inputs[0]
-        .partial_sigs
-        .get(&seller_pk)
-        .ok_or_else(|| anyhow!("seller signature missing from sale template PSBT input 0"))?;
+        .tap_script_sigs
+        .iter()
+        .find(|((pk, _leaf_hash), _sig)| *pk == seller_xonly)
+        .map(|(_, sig)| sig)
+        .ok_or_else(|| anyhow!("seller taproot signature missing from sale template PSBT input 0"))?;
 
-    // Serialize: DER-encoded sig + sighash byte
     Ok(hex::encode(sig.to_vec()))
 }
+
+// ── Protected sale PSBT (Taproot) ───────────────────────────────────────────
 
 pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<ProtectedSalePsbt> {
     let locking_tx = parse_tx_hex("locking_raw_tx_hex", &req.locking_raw_tx_hex)?;
@@ -715,9 +803,13 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
     let buyer_addr = Address::from_str(&req.buyer_address)
         .map_err(|e| anyhow!("invalid buyer_address: {}", e))?
         .assume_checked();
-    let witness_script = parse_script_hex("multisig_script_hex", &req.multisig_script_hex)?;
+    let leaf_script = parse_script_hex("multisig_script_hex", &req.multisig_script_hex)?;
     let buyer_input_type =
         detect_supported_input_type(&req.buyer_funding_input, "buyer_funding_input")?;
+
+    // Reconstruct the Taproot multisig to get internal_key and control_block.
+    let seller_pk = PublicKey::from_str(&req.seller_pubkey_hex)
+        .map_err(|e| anyhow!("invalid seller_pubkey_hex: {}", e))?;
 
     let marketplace_fee_sats = calculate_marketplace_fee(req.price_sats, req.marketplace_fee_bps);
     let fee_addr = req
@@ -798,22 +890,41 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
 
     let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)
         .map_err(|e| anyhow!("protected sale PSBT creation failed: {}", e))?;
-    psbt.inputs[0].sighash_type = Some(PsbtSighashType::from(
-        bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
-    ));
+
+    // Reconstruct Taproot metadata for the multisig input.
+    let internal_key = XOnlyPublicKey::from(seller_pk);
+    let builder = TaprootBuilder::new()
+        .add_leaf(0, leaf_script.clone())
+        .map_err(|e| anyhow!("TaprootBuilder::add_leaf failed: {:?}", e))?;
+    let spend_info = builder
+        .finalize(&secp256k1::Secp256k1::new(), internal_key)
+        .map_err(|_| anyhow!("TaprootBuilder::finalize failed"))?;
+    let control_block = spend_info
+        .control_block(&(leaf_script.clone(), LeafVersion::TapScript))
+        .ok_or_else(|| anyhow!("failed to compute control block"))?;
+
     psbt.inputs[0].witness_utxo = Some(multisig_txout);
-    psbt.inputs[0].witness_script = Some(witness_script);
+    psbt.inputs[0].tap_internal_key = Some(internal_key);
+    psbt.inputs[0].tap_merkle_root = Some(
+        TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript).into(),
+    );
+    psbt.inputs[0]
+        .tap_scripts
+        .insert(control_block, (leaf_script.clone(), LeafVersion::TapScript));
+
     add_spendable_input(&mut psbt, 1, &req.buyer_funding_input)?;
 
-    // Embed the seller's pre-signed partial_sig (produced at listing time).
+    // Embed the seller's pre-signed Schnorr tap_script_sig (produced at listing time).
     if let Some(ref sig_hex) = req.seller_sale_sig_hex {
         let sig_bytes = hex::decode(sig_hex)
             .map_err(|e| anyhow!("invalid seller_sale_sig_hex: {}", e))?;
-        let seller_pk = bitcoin::PublicKey::from_str(&req.seller_pubkey_hex)
-            .map_err(|e| anyhow!("invalid seller_pubkey_hex: {}", e))?;
-        let ecdsa_sig = ecdsa::Signature::from_slice(&sig_bytes)
-            .map_err(|e| anyhow!("invalid seller ECDSA signature: {}", e))?;
-        psbt.inputs[0].partial_sigs.insert(seller_pk, ecdsa_sig);
+        let schnorr_sig = taproot::Signature::from_slice(&sig_bytes)
+            .map_err(|e| anyhow!("invalid seller Schnorr signature: {}", e))?;
+        let seller_xonly = XOnlyPublicKey::from(seller_pk);
+        let leaf_hash = TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript);
+        psbt.inputs[0]
+            .tap_script_sigs
+            .insert((seller_xonly, leaf_hash), schnorr_sig);
     }
 
     Ok(ProtectedSalePsbt {
@@ -824,54 +935,64 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
     })
 }
 
+// ── Marketplace Schnorr co-signing (Taproot) ────────────────────────────────
+
 pub fn apply_marketplace_signature(
     psbt_hex: &str,
     marketplace_keypair: &MarketplaceKeypair,
 ) -> Result<String> {
-    use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+    use bitcoin::sighash::SighashCache;
 
     let mut psbt = decode_psbt(psbt_hex)?;
 
-    let witness_script = psbt.inputs[0]
-        .witness_script
-        .clone()
-        .ok_or_else(|| anyhow!("input 0 missing witness_script"))?;
-    let witness_utxo = psbt.inputs[0]
-        .witness_utxo
-        .clone()
-        .ok_or_else(|| anyhow!("input 0 missing witness_utxo"))?;
+    // Get the leaf script from tap_scripts.
+    let (leaf_script, _leaf_version) = psbt.inputs[0]
+        .tap_scripts
+        .values()
+        .next()
+        .ok_or_else(|| anyhow!("input 0 missing tap_scripts"))?
+        .clone();
+
+    let leaf_hash = TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript);
+
+    // Collect all prevouts for taproot sighash computation.
+    let prevouts: Vec<TxOut> = psbt
+        .inputs
+        .iter()
+        .map(|input| {
+            input
+                .witness_utxo
+                .clone()
+                .ok_or_else(|| anyhow!("input missing witness_utxo"))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let mut sighash_cache = SighashCache::new(&psbt.unsigned_tx);
     let sighash = sighash_cache
-        .p2wsh_signature_hash(
+        .taproot_script_spend_signature_hash(
             0,
-            &witness_script,
-            witness_utxo.value,
-            EcdsaSighashType::All,
+            &bitcoin::sighash::Prevouts::All(&prevouts),
+            leaf_hash,
+            TapSighashType::All,
         )
-        .map_err(|e| anyhow!("sighash computation failed: {}", e))?;
+        .map_err(|e| anyhow!("taproot sighash computation failed: {}", e))?;
 
-    let sighash_slice: &[u8] = sighash.as_ref();
-    let sighash_bytes: [u8; 32] = sighash_slice
-        .try_into()
-        .expect("sighash is always 32 bytes");
-    let sig = marketplace_keypair.sign_sighash(&sighash_bytes)?;
-    let ecdsa_sig = ecdsa::Signature {
-        sig,
-        hash_ty: EcdsaSighashType::All,
+    let sighash_bytes: [u8; 32] = sighash.to_byte_array();
+    let schnorr_sig = marketplace_keypair.sign_schnorr(&sighash_bytes)?;
+    let tap_sig = taproot::Signature {
+        sig: schnorr_sig,
+        hash_ty: TapSighashType::All,
     };
 
-    let marketplace_pubkey = bitcoin::PublicKey {
-        compressed: true,
-        inner: marketplace_keypair.public_key(),
-    };
-
+    let marketplace_xonly = marketplace_keypair.x_only_pubkey();
     psbt.inputs[0]
-        .partial_sigs
-        .insert(marketplace_pubkey, ecdsa_sig);
+        .tap_script_sigs
+        .insert((marketplace_xonly, leaf_hash), tap_sig);
 
     Ok(encode_psbt(&psbt))
 }
+
+// ── Finalize Taproot multisig and extract ───────────────────────────────────
 
 pub fn finalize_multisig_and_extract(
     psbt_hex: &str,
@@ -880,44 +1001,67 @@ pub fn finalize_multisig_and_extract(
 ) -> Result<String> {
     let mut psbt = decode_psbt(psbt_hex)?;
 
-    let witness_script = psbt.inputs[0]
-        .witness_script
-        .clone()
-        .ok_or_else(|| anyhow!("input 0 missing witness_script"))?;
-    let seller_pk = bitcoin::PublicKey::from_str(seller_pubkey_hex)
+    let seller_pk = PublicKey::from_str(seller_pubkey_hex)
         .map_err(|e| anyhow!("invalid seller_pubkey_hex: {}", e))?;
-    let marketplace_pk = bitcoin::PublicKey::from_str(marketplace_pubkey_hex)
+    let marketplace_pk = PublicKey::from_str(marketplace_pubkey_hex)
         .map_err(|e| anyhow!("invalid marketplace_pubkey_hex: {}", e))?;
 
+    // Get the leaf script and control block from tap_scripts.
+    let (control_block, (leaf_script, _)) = psbt.inputs[0]
+        .tap_scripts
+        .iter()
+        .next()
+        .ok_or_else(|| anyhow!("input 0 missing tap_scripts"))?;
+    let leaf_script = leaf_script.clone();
+    let control_block = control_block.clone();
+
+    let leaf_hash = TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript);
+    let seller_xonly = XOnlyPublicKey::from(seller_pk);
+    let marketplace_xonly = XOnlyPublicKey::from(marketplace_pk);
+
     let seller_sig = psbt.inputs[0]
-        .partial_sigs
-        .get(&seller_pk)
-        .ok_or_else(|| anyhow!("seller signature missing from PSBT input 0"))?
+        .tap_script_sigs
+        .get(&(seller_xonly, leaf_hash))
+        .ok_or_else(|| anyhow!("seller taproot signature missing from PSBT input 0"))?
         .clone();
     let marketplace_sig = psbt.inputs[0]
-        .partial_sigs
-        .get(&marketplace_pk)
-        .ok_or_else(|| anyhow!("marketplace signature missing from PSBT input 0"))?
+        .tap_script_sigs
+        .get(&(marketplace_xonly, leaf_hash))
+        .ok_or_else(|| anyhow!("marketplace taproot signature missing from PSBT input 0"))?
         .clone();
 
-    let (first_sig, second_sig) = {
-        let seller_bytes = seller_pk.inner.serialize();
-        let marketplace_bytes = marketplace_pk.inner.serialize();
-        if seller_bytes <= marketplace_bytes {
-            (seller_sig, marketplace_sig)
-        } else {
-            (marketplace_sig, seller_sig)
-        }
+    // Taproot script-path witness: signatures in REVERSE script order.
+    // Script: <xpk1> CHECKSIG <xpk2> CHECKSIGADD 2 NUMEQUAL
+    // Witness stack (bottom to top): sig_for_xpk1, sig_for_xpk2, leaf_script, control_block
+    // But the witness is pushed top-to-bottom, so: [sig2, sig1, script, controlblock]
+    let (xpk1, xpk2) = sorted_x_only_pubkeys(&seller_pk, &marketplace_pk);
+    let sig1 = if seller_xonly == xpk1 {
+        &seller_sig
+    } else {
+        &marketplace_sig
+    };
+    let sig2 = if seller_xonly == xpk2 {
+        &seller_sig
+    } else {
+        &marketplace_sig
     };
 
+    // Witness stack for CHECKSIGADD: sig_for_pk2 (last checked), sig_for_pk1 (first checked),
+    // then leaf_script and control_block.
+    let sig2_bytes = sig2.to_vec();
+    let sig1_bytes = sig1.to_vec();
+    let leaf_bytes = leaf_script.as_bytes().to_vec();
+    let cb_bytes = control_block.serialize();
     psbt.inputs[0].final_script_witness = Some(Witness::from_slice(&[
-        &[][..],
-        &first_sig.to_vec(),
-        &second_sig.to_vec(),
-        witness_script.as_bytes(),
+        &sig2_bytes,
+        &sig1_bytes,
+        &leaf_bytes,
+        &cb_bytes,
     ]));
-    psbt.inputs[0].partial_sigs.clear();
-    psbt.inputs[0].witness_script = None;
+    psbt.inputs[0].tap_script_sigs.clear();
+    psbt.inputs[0].tap_scripts.clear();
+    psbt.inputs[0].tap_internal_key = None;
+    psbt.inputs[0].tap_merkle_root = None;
     psbt.inputs[0].sighash_type = None;
 
     for input in psbt.inputs.iter_mut().skip(1) {

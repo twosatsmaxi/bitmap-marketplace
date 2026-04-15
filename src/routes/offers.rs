@@ -1,4 +1,5 @@
 use crate::{
+    db::Database,
     errors::{AppError, AppResult},
     models::activity::{Activity, ActivityType},
     models::listing::ListingStatus,
@@ -164,7 +165,8 @@ async fn accept_offer(
         )
         .map_err(AppError::Internal)?;
 
-        rpc.verify_locking_tx_inputs_unspent(locking_raw_tx)
+        // Pre-broadcast UTXO liveness check.
+        rpc.verify_inputs_unspent(locking_raw_tx)
             .map_err(|e| AppError::Conflict(e.to_string()))?;
 
         let txids = rpc
@@ -221,24 +223,9 @@ async fn accept_offer(
         confirmed_at: None,
         created_at: Utc::now(),
     };
-    sqlx::query(
-        r#"INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, marketplace_fee_sats, tx_id, locking_tx_id, block_height, confirmed_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
-    )
-    .bind(sale.id)
-    .bind(sale.listing_id)
-    .bind(&sale.inscription_id)
-    .bind(&sale.seller_address)
-    .bind(&sale.buyer_address)
-    .bind(sale.price_sats)
-    .bind(sale.marketplace_fee_sats)
-    .bind(&sale.tx_id)
-    .bind(&sale.locking_tx_id)
-    .bind(sale.block_height)
-    .bind(sale.confirmed_at)
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
+    Database::create_sale_in_tx(&mut *tx, &sale)
+        .await
+        .map_err(AppError::Internal)?;
 
     // Update inscription ownership
     sqlx::query(

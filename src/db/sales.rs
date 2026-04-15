@@ -2,6 +2,7 @@ use super::Database;
 use crate::models::sale::Sale;
 use anyhow::Result;
 use chrono::Utc;
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 impl Database {
@@ -33,6 +34,18 @@ impl Database {
     }
 
     pub async fn create_sale(&self, sale: &Sale) -> Result<Sale> {
+        Self::insert_sale(&self.pool, sale).await
+    }
+
+    /// Insert a sale using an existing transaction connection.
+    pub async fn create_sale_in_tx(conn: &mut PgConnection, sale: &Sale) -> Result<Sale> {
+        Self::insert_sale(conn, sale).await
+    }
+
+    async fn insert_sale<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+        executor: E,
+        sale: &Sale,
+    ) -> Result<Sale> {
         let result = sqlx::query_as::<_, Sale>(
             r#"
             INSERT INTO sales (id, listing_id, inscription_id, seller_address, buyer_address, price_sats, marketplace_fee_sats, tx_id, locking_tx_id, block_height, confirmed_at)
@@ -51,7 +64,7 @@ impl Database {
         .bind(&sale.locking_tx_id)
         .bind(sale.block_height)
         .bind(sale.confirmed_at)
-        .fetch_one(&self.pool)
+        .fetch_one(executor)
         .await?;
         Ok(result)
     }
