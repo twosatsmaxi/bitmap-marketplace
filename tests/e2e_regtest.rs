@@ -109,9 +109,10 @@ async fn test_unprotected_buy_flow() {
     )
     .expect("build_listing_psbt failed");
 
-    // Sign the listing PSBT with the seller's wallet
+    // Sign the listing PSBT with the seller's wallet (SINGLE|ANYONECANPAY)
     let listing_psbt_b64 = psbt_hex_to_base64(&listing_psbt.psbt_hex);
-    let signed_listing_b64 = rpc.wallet_sign_psbt(&listing_psbt_b64);
+    let signed_listing_b64 =
+        rpc.wallet_sign_psbt_with_sighash(&listing_psbt_b64, "SINGLE|ANYONECANPAY");
     let signed_listing_hex = psbt_base64_to_hex(&signed_listing_b64);
 
     // --- Create listing via API ---
@@ -129,7 +130,7 @@ async fn test_unprotected_buy_flow() {
     let (status, body) =
         json_response(&router, get(&format!("/api/listings/{listing_id}"))).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["status"], "active");
+    assert_eq!(body["status"], "Active");
     assert_eq!(body["protection_status"], "none");
 
     // --- Buyer setup ---
@@ -165,7 +166,14 @@ async fn test_unprotected_buy_flow() {
     assert_eq!(body["protection_status"], "none");
 
     // --- Buyer signs the buy PSBT ---
-    let buy_psbt_b64 = psbt_hex_to_base64(buy_psbt_hex);
+    // Clear seller input's sighash_type before walletprocesspsbt — Bitcoin Core
+    // v28 rejects the global sighash param if it mismatches ANY input's stored
+    // sighash, even inputs the wallet can't sign. The seller's sig is already in
+    // partial_sigs, so clearing sighash_type here is safe.
+    let mut buy_psbt = bitmap_marketplace::services::psbt::decode_psbt(buy_psbt_hex).unwrap();
+    buy_psbt.inputs[0].sighash_type = None;
+    let buy_psbt_clean = bitmap_marketplace::services::psbt::encode_psbt(&buy_psbt);
+    let buy_psbt_b64 = psbt_hex_to_base64(&buy_psbt_clean);
     let signed_buy_b64 = rpc.wallet_sign_psbt(&buy_psbt_b64);
     let signed_buy_hex = psbt_base64_to_hex(&signed_buy_b64);
 
@@ -186,12 +194,10 @@ async fn test_unprotected_buy_flow() {
     let (status, body) =
         json_response(&router, get(&format!("/api/listings/{listing_id}"))).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["status"], "sold");
+    assert_eq!(body["status"], "Sold");
 
     // --- Verify transaction exists on-chain ---
-    let txid = bitcoin::Txid::from_raw_hash(
-        tx_id.parse::<bitcoin::hashes::sha256d::Hash>().unwrap(),
-    );
+    let txid = tx_id.parse::<bitcoin::Txid>().unwrap();
     let tx = rpc.get_raw_transaction(&txid);
     assert!(!tx.input.is_empty(), "broadcast tx should have inputs");
 }
@@ -303,8 +309,8 @@ async fn test_protected_buy_flow() {
     sale_template_psbt.inputs[0].partial_sigs.insert(
         seller_pubkey,
         ecdsa::Signature {
-            sig,
-            hash_ty: bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
+            signature: sig,
+            sighash_type: bitcoin::EcdsaSighashType::SinglePlusAnyoneCanPay,
         },
     );
     let signed_sale_template_hex =
@@ -361,8 +367,12 @@ async fn test_protected_buy_flow() {
     assert_eq!(body["protection_status"], "active");
 
     // --- Buyer signs their input (input 1) ---
-    // The buyer's wallet owns the funding UTXO.
-    let buy_b64 = psbt_hex_to_base64(buy_psbt_hex);
+    // Clear seller input's sighash_type — Bitcoin Core v28 rejects the global
+    // sighash param if it mismatches any input's stored sighash.
+    let mut buy_psbt = bitmap_marketplace::services::psbt::decode_psbt(buy_psbt_hex).unwrap();
+    buy_psbt.inputs[0].sighash_type = None;
+    let buy_psbt_clean = bitmap_marketplace::services::psbt::encode_psbt(&buy_psbt);
+    let buy_b64 = psbt_hex_to_base64(&buy_psbt_clean);
     let signed_buy_b64 = rpc.wallet_sign_psbt(&buy_b64);
     let signed_buy_hex = psbt_base64_to_hex(&signed_buy_b64);
 
@@ -389,13 +399,11 @@ async fn test_protected_buy_flow() {
     // --- Verify listing is sold ---
     let (_, listing_body) =
         json_response(&router, get(&format!("/api/listings/{listing_id}"))).await;
-    assert_eq!(listing_body["status"], "sold");
+    assert_eq!(listing_body["status"], "Sold");
 
     // --- Mine a block and verify transactions are confirmed ---
     rpc.mine_blocks(1);
-    let sale_txid = bitcoin::Txid::from_raw_hash(
-        sale_tx_id.parse::<bitcoin::hashes::sha256d::Hash>().unwrap(),
-    );
+    let sale_txid = sale_tx_id.parse::<bitcoin::Txid>().unwrap();
     let sale_tx = rpc.get_raw_transaction(&sale_txid);
     assert!(!sale_tx.input.is_empty());
 }
@@ -428,9 +436,9 @@ async fn test_cancel_listing() {
     assert_eq!(status, StatusCode::OK, "cancel failed: {body}");
     assert_eq!(body["status"], "cancelled");
 
-    // Verify
+    // Verify — GET serializes the enum via serde (PascalCase), not sqlx (lowercase)
     let (_, body) = json_response(&router, get(&format!("/api/listings/{listing_id}"))).await;
-    assert_eq!(body["status"], "cancelled");
+    assert_eq!(body["status"], "Cancelled");
 }
 
 // ---------------------------------------------------------------------------

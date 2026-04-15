@@ -790,7 +790,7 @@ pub fn extract_seller_sale_sig(
 
 pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<ProtectedSalePsbt> {
     let locking_tx = parse_tx_hex("locking_raw_tx_hex", &req.locking_raw_tx_hex)?;
-    let locking_txid = locking_tx.txid();
+    let locking_txid = locking_tx.compute_txid();
     let multisig_txout = locking_tx
         .output
         .get(req.multisig_vout as usize)

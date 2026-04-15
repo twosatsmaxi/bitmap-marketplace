@@ -30,17 +30,16 @@ fn bitcoin_pubkey(secret_key: &secp256k1::SecretKey) -> bitcoin::PublicKey {
 }
 
 fn p2wpkh_script(secret_key: &secp256k1::SecretKey) -> ScriptBuf {
-    Address::p2wpkh(&bitcoin_pubkey(secret_key), Network::Bitcoin)
-        .unwrap()
-        .script_pubkey()
+    let pk = secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), secret_key);
+    let compressed = bitcoin::CompressedPublicKey(pk);
+    Address::p2wpkh(&compressed, Network::Bitcoin).script_pubkey()
 }
 
 fn p2sh_p2wpkh_scripts(secret_key: &secp256k1::SecretKey) -> (ScriptBuf, ScriptBuf) {
-    let pubkey = bitcoin_pubkey(secret_key);
-    let redeem_script = ScriptBuf::new_p2wpkh(&pubkey.wpubkey_hash().unwrap());
-    let script_pubkey = Address::p2shwpkh(&pubkey, Network::Bitcoin)
-        .unwrap()
-        .script_pubkey();
+    let pk = secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), secret_key);
+    let compressed = bitcoin::CompressedPublicKey(pk);
+    let redeem_script = ScriptBuf::new_p2wpkh(&compressed.wpubkey_hash());
+    let script_pubkey = Address::p2shwpkh(&compressed, Network::Bitcoin).script_pubkey();
     (script_pubkey, redeem_script)
 }
 
@@ -151,8 +150,8 @@ fn sign_p2wpkh_input(psbt: &mut Psbt, input_index: usize, secret_key: &secp256k1
     psbt.inputs[input_index].partial_sigs.insert(
         public_key,
         ecdsa::Signature {
-            sig,
-            hash_ty: bitcoin::EcdsaSighashType::All,
+            signature: sig,
+            sighash_type: bitcoin::EcdsaSighashType::All,
         },
     );
 }
@@ -413,8 +412,8 @@ fn finalize_locking_psbt_supports_taproot_keypath() {
     let msg = secp256k1::Message::from_digest([21u8; 32]);
     let sig = secp.sign_schnorr(&msg, &keypair);
     psbt.inputs[0].tap_key_sig = Some(taproot::Signature {
-        sig,
-        hash_ty: bitcoin::sighash::TapSighashType::Default,
+        signature: sig,
+        sighash_type: bitcoin::sighash::TapSighashType::Default,
     });
 
     let raw_tx = finalize_locking_psbt(&encode_psbt(&psbt)).unwrap();
@@ -542,8 +541,8 @@ fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
     psbt.inputs[1].partial_sigs.insert(
         buyer_pubkey,
         ecdsa::Signature {
-            sig: buyer_sig,
-            hash_ty: bitcoin::EcdsaSighashType::All,
+            signature: buyer_sig,
+            sighash_type: bitcoin::EcdsaSighashType::All,
         },
     );
 

@@ -11,6 +11,7 @@ use bitcoincore_rpc::{Auth, Client, RpcApi};
 use secrecy::SecretString;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::runners::AsyncRunner;
+use testcontainers::core::WaitFor;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use testcontainers_modules::postgres::Postgres;
 
@@ -36,23 +37,28 @@ impl TestInfra {
     /// Start Postgres + bitcoind containers and return connection info.
     pub async fn start() -> Self {
         // Start Postgres
+        // Use Postgres 16: gen_random_uuid() is built-in since v13, and the
+        // testcontainers default (11-alpine) doesn't have it.
         let pg_container = Postgres::default()
+            .with_tag("16-alpine")
             .start()
             .await
             .expect("failed to start postgres container");
-        let pg_host = pg_container.get_host().await.unwrap();
         let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
-        let db_url = format!("postgres://postgres:postgres@{pg_host}:{pg_port}/postgres");
+        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
 
         // Start bitcoind in regtest mode
         // Uses the official bitcoin/bitcoin image (v28+, supports submitpackage).
         // Pass args with leading `-` so the entrypoint prepends `bitcoind` automatically.
         let btc_container = GenericImage::new("bitcoin/bitcoin", "28.1")
             .with_exposed_port(18443.into())
+            .with_wait_for(WaitFor::message_on_stdout("Done loading"))
+            .with_startup_timeout(Duration::from_secs(60))
             .with_cmd(vec![
                 "-regtest".to_string(),
                 "-server".to_string(),
                 "-txindex".to_string(),
+                "-printtoconsole".to_string(),
                 "-rpcport=18443".to_string(),
                 "-rpcuser=bitcoin".to_string(),
                 "-rpcpassword=bitcoin".to_string(),
@@ -64,9 +70,10 @@ impl TestInfra {
             .await
             .expect("failed to start bitcoind container");
 
-        let btc_host = btc_container.get_host().await.unwrap();
+        // Use 127.0.0.1 explicitly: get_host() returns "localhost" which resolves
+        // to IPv6 (::1) first on macOS, but Docker binds ports to 0.0.0.0 (IPv4 only).
         let btc_port = btc_container.get_host_port_ipv4(18443).await.unwrap();
-        let rpc_url = format!("http://{btc_host}:{btc_port}");
+        let rpc_url = format!("http://127.0.0.1:{btc_port}");
         eprintln!("[regtest] bitcoind RPC URL: {rpc_url}");
 
         // Wait for bitcoind to be ready
@@ -94,7 +101,10 @@ impl TestInfra {
         let mut last_err = String::new();
         for _ in 0..60 {
             match Client::new(url, Auth::UserPass("bitcoin".into(), "bitcoin".into())) {
-                Ok(client) => match client.get_blockchain_info() {
+                // Use get_block_count() instead of get_blockchain_info() because
+                // bitcoincore_rpc 0.18 can't deserialize Bitcoin Core v28's response
+                // (warnings field changed from String to Vec<String>).
+                Ok(client) => match client.get_block_count() {
                     Ok(_) => return client,
                     Err(e) => last_err = format!("RPC call failed: {e}"),
                 },
@@ -171,16 +181,23 @@ impl RpcHelper {
         )
     }
 
-    /// Sign a PSBT using the wallet's keys. Returns the signed PSBT hex.
+    /// Sign a PSBT using the wallet's keys. Returns the signed PSBT base64.
+    /// Bitcoin Core v28 rejects sighash mismatches, so callers must pass the
+    /// correct sighash type matching what's stored in the PSBT inputs.
     pub fn wallet_sign_psbt(&self, psbt_base64: &str) -> String {
+        self.wallet_sign_psbt_with_sighash(psbt_base64, "ALL")
+    }
+
+    /// Sign a PSBT with a specific sighash type.
+    pub fn wallet_sign_psbt_with_sighash(&self, psbt_base64: &str, sighash: &str) -> String {
         let result: serde_json::Value = self
             .client
             .call(
                 "walletprocesspsbt",
                 &[
                     serde_json::json!(psbt_base64),
-                    serde_json::json!(true),  // sign
-                    serde_json::json!("ALL"), // sighash type
+                    serde_json::json!(true),
+                    serde_json::json!(sighash),
                 ],
             )
             .expect("walletprocesspsbt failed");
