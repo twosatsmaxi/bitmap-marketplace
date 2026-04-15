@@ -80,7 +80,7 @@ impl MarketplaceKeypair {
 }
 
 /// Test-only constructor — produces a valid but insecure keypair from a known seed.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl MarketplaceKeypair {
     pub fn for_testing() -> Arc<Self> {
         // 0x01 key: well-known test seed, valid for secp256k1 (far below curve order)

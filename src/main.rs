@@ -23,38 +23,16 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{self, TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod db;
-pub mod errors;
-mod models;
-mod routes;
-mod services;
-pub mod ws;
-
-use crate::db::Database;
-use crate::services::marketplace_keypair::MarketplaceKeypair;
-use crate::services::ord::OrdClient;
+use bitmap_marketplace::db::Database;
+use bitmap_marketplace::services::marketplace_keypair::MarketplaceKeypair;
+use bitmap_marketplace::services::ord::OrdClient;
+use bitmap_marketplace::{routes, ws, AppState};
 
 /// Maximum number of pending auth challenges to store
 const MAX_CHALLENGES: u64 = 10_000;
 
 /// Challenge nonces expire after this duration
 const CHALLENGE_TTL: Duration = Duration::from_secs(10 * 60);
-
-#[derive(Clone)]
-pub struct AppState {
-    pub db: Database,
-    pub ws_broadcaster: Arc<ws::WsBroadcaster>,
-    pub marketplace_keypair: Arc<MarketplaceKeypair>,
-    pub http_client: reqwest::Client,
-    pub ord_client: OrdClient,
-    pub render_api_base: String,
-    pub network: Network,
-    pub allowed_address_network: Network,
-    pub jwt_secret: SecretString,
-    pub marketplace_fee_address: Option<String>,
-    pub marketplace_fee_bps: u64,
-    pub challenges: moka::future::Cache<String, routes::auth::Challenge>,
-}
 
 /// GET /health — unauthenticated, not rate-limited.
 /// Returns 200 if the database is reachable, 503 otherwise.
@@ -622,11 +600,14 @@ mod tests {
             .unwrap();
 
         let state = AppState {
-            db: crate::db::Database { pool },
-            ws_broadcaster: std::sync::Arc::new(crate::ws::WsBroadcaster::new()),
-            marketplace_keypair: crate::services::marketplace_keypair::MarketplaceKeypair::for_testing(),
+            db: bitmap_marketplace::db::Database { pool },
+            ws_broadcaster: std::sync::Arc::new(bitmap_marketplace::ws::WsBroadcaster::new()),
+            marketplace_keypair: {
+                std::env::set_var("MARKETPLACE_SECRET_KEY", "0000000000000000000000000000000000000000000000000000000000000001");
+                bitmap_marketplace::services::marketplace_keypair::MarketplaceKeypair::from_env().unwrap()
+            },
             http_client: reqwest::Client::new(),
-            ord_client: crate::services::ord::OrdClient::new(),
+            ord_client: bitmap_marketplace::services::ord::OrdClient::new(),
             render_api_base: "http://localhost".to_string(),
             network: bitcoin::Network::Regtest,
             allowed_address_network: bitcoin::Network::Bitcoin,
