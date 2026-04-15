@@ -231,6 +231,10 @@ async fn test_protected_buy_flow() {
     let (inscription_script_hex, inscription_value_sats) =
         rpc.get_utxo_info(&inscription_txid, inscription_vout);
 
+    // Lock the inscription UTXO so the wallet doesn't accidentally spend it
+    // when funding other addresses (e.g. the buyer).
+    rpc.lock_utxo(&inscription_txid, inscription_vout);
+
     let price_sats: i64 = 50_000;
 
     // Seller keypair — we need the secret key for manual signing of the sale template.

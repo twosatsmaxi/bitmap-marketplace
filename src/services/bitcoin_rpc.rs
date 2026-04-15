@@ -199,14 +199,54 @@ impl BitcoinRpc {
         let tx_array: Vec<serde_json::Value> = txns.iter().map(|tx| json!(tx)).collect();
         let result: serde_json::Value = self.client.call("submitpackage", &[json!(tx_array)])?;
 
-        // submitpackage returns {"tx-results": {txid: {...}}, "replaced-transactions": [...]}
-        // Extract accepted txids from tx-results keys.
-        let txids = result
+        // Check top-level package_msg for package-wide rejection.
+        if let Some(pkg_msg) = result.get("package_msg").and_then(|v| v.as_str()) {
+            if pkg_msg != "success" {
+                // Collect per-tx errors for diagnostics.
+                let tx_errors: Vec<String> = result
+                    .get("tx-results")
+                    .and_then(|r| r.as_object())
+                    .into_iter()
+                    .flat_map(|m| m.iter())
+                    .filter_map(|(wtxid, detail)| {
+                        detail.get("error").and_then(|e| e.as_str()).map(|err| {
+                            format!("{}: {}", wtxid, err)
+                        })
+                    })
+                    .collect();
+                return Err(anyhow!(
+                    "submitpackage rejected ({}): [{}]",
+                    pkg_msg,
+                    tx_errors.join(", ")
+                ));
+            }
+        }
+
+        // submitpackage returns {"tx-results": {wtxid: {txid, ...}}, "replaced-transactions": [...]}
+        // Keys are wtxids; each entry has a "txid" field and optionally an "error" field.
+        let tx_results = result
             .get("tx-results")
             .and_then(|r| r.as_object())
-            .map(|m| m.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+            .ok_or_else(|| anyhow!("submitpackage response missing tx-results"))?;
 
-        Ok(txids)
+        let mut accepted_txids = Vec::new();
+        for (wtxid, detail) in tx_results {
+            if let Some(err) = detail.get("error").and_then(|e| e.as_str()) {
+                return Err(anyhow!(
+                    "submitpackage tx {} rejected: {}",
+                    wtxid,
+                    err
+                ));
+            }
+            // Use the "txid" field if present, otherwise fall back to the key (wtxid).
+            let txid = detail
+                .get("txid")
+                .and_then(|v| v.as_str())
+                .unwrap_or(wtxid)
+                .to_string();
+            accepted_txids.push(txid);
+        }
+
+        Ok(accepted_txids)
     }
 }

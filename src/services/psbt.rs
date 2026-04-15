@@ -148,7 +148,7 @@ enum SupportedInputType {
     P2tr,
 }
 
-const DEFAULT_MIN_RELAY_FEE_RATE_SAT_VB: f64 = 0.1;
+const DEFAULT_MIN_RELAY_FEE_RATE_SAT_VB: f64 = 1.0;
 const LOCKING_TX_OUTPUT_VBYTES: f64 = 43.0;
 const LOCKING_TX_OVERHEAD_VBYTES: f64 = 10.5;
 const SALE_TX_OUTPUT_VBYTES: f64 = 31.0;
@@ -980,8 +980,8 @@ pub fn apply_marketplace_signature(
     let sighash_bytes: [u8; 32] = sighash.to_byte_array();
     let schnorr_sig = marketplace_keypair.sign_schnorr(&sighash_bytes)?;
     let tap_sig = taproot::Signature {
-        sig: schnorr_sig,
-        hash_ty: TapSighashType::All,
+        signature: schnorr_sig,
+        sighash_type: TapSighashType::All,
     };
 
     let marketplace_xonly = marketplace_keypair.x_only_pubkey();

@@ -178,20 +178,25 @@ async fn confirm_order(
         rpc.verify_inputs_unspent(&locking_raw_tx)
             .map_err(|e| AppError::Conflict(e.to_string()))?;
 
-        // Package broadcast: [locking_tx, sale_tx].
-        let txids = rpc
-            .submit_package(&[&locking_raw_tx, &sale_raw_tx])
-            .map_err(|e| AppError::Internal(e))?;
+        // Compute txids from raw hex before broadcast so we don't depend on
+        // HashMap iteration order from submitpackage's tx-results.
+        let locking_txid = {
+            let tx_bytes = hex::decode(&locking_raw_tx)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad locking hex: {e}")))?;
+            let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&tx_bytes)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad locking tx: {e}")))?;
+            tx.compute_txid().to_string()
+        };
+        let sale_txid = {
+            let tx_bytes = hex::decode(&sale_raw_tx)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad sale hex: {e}")))?;
+            let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&tx_bytes)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad sale tx: {e}")))?;
+            tx.compute_txid().to_string()
+        };
 
-        let sale_txid = txids
-            .last()
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-        let locking_txid = txids
-            .first()
-            .cloned()
-            .or(req.locking_txid)
-            .unwrap_or_else(|| "unknown".to_string());
+        rpc.submit_package(&[&locking_raw_tx, &sale_raw_tx])
+            .map_err(|e| AppError::Internal(e))?;
 
         // Wrap all DB writes in a transaction for atomicity.
         let mut tx = state.db.pool.begin().await.map_err(AppError::Database)?;

@@ -204,6 +204,17 @@ impl RpcHelper {
         result["psbt"].as_str().unwrap().to_string()
     }
 
+    /// Lock a UTXO so the wallet won't spend it in other transactions.
+    pub fn lock_utxo(&self, txid: &bitcoin::Txid, vout: u32) {
+        let outpoint = bitcoin::OutPoint {
+            txid: *txid,
+            vout,
+        };
+        self.client
+            .lock_unspent(&[outpoint])
+            .expect("failed to lock UTXO");
+    }
+
     /// Get the underlying RPC client.
     pub fn client(&self) -> &Client {
         &self.client

@@ -221,7 +221,7 @@ fn locking_psbt_populates_real_funding_metadata() {
     let inscription_input = spendable_input(
         FAKE_TXID,
         0,
-        MIN_SELF_FUNDED + 100,
+        MIN_SELF_FUNDED + 200,
         p2wpkh_script(&secret_key(5)),
     );
     let req = LockingPsbtRequest {
@@ -233,8 +233,6 @@ fn locking_psbt_populates_real_funding_metadata() {
         marketplace_pubkey_hex: bitcoin_pubkey(&secret_key(7)).to_string(),
         network: Network::Bitcoin,
         min_relay_fee_rate_sat_vb: None,
-        seller_address: SELLER_ADDR.to_string(),
-        price_sats: 50_000,
     };
 
     let result = build_locking_psbt(&req).unwrap();
@@ -280,8 +278,6 @@ fn locking_psbt_requires_gas_below_threshold() {
         marketplace_pubkey_hex: bitcoin_pubkey(&secret_key(10)).to_string(),
         network: Network::Bitcoin,
         min_relay_fee_rate_sat_vb: None,
-        seller_address: SELLER_ADDR.to_string(),
-        price_sats: 50_000,
     };
 
     let err = build_locking_psbt(&req).unwrap_err();
@@ -304,8 +300,6 @@ fn locking_psbt_rejects_insufficient_gas_funding() {
         marketplace_pubkey_hex: bitcoin_pubkey(&secret_key(14)).to_string(),
         network: Network::Bitcoin,
         min_relay_fee_rate_sat_vb: Some(1.0),
-        seller_address: SELLER_ADDR.to_string(),
-        price_sats: 50_000,
     };
 
     let err = build_locking_psbt(&req).unwrap_err();
@@ -497,8 +491,8 @@ fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
         &seller_keypair,
     );
     let seller_tap_sig = taproot::Signature {
-        sig: seller_schnorr_sig,
-        hash_ty: bitcoin::sighash::TapSighashType::SinglePlusAnyoneCanPay,
+        signature: seller_schnorr_sig,
+        sighash_type: bitcoin::sighash::TapSighashType::SinglePlusAnyoneCanPay,
     };
     psbt.inputs[0]
         .tap_script_sigs
@@ -520,8 +514,8 @@ fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
         &marketplace_keypair,
     );
     let marketplace_tap_sig = taproot::Signature {
-        sig: marketplace_schnorr_sig,
-        hash_ty: bitcoin::sighash::TapSighashType::All,
+        signature: marketplace_schnorr_sig,
+        sighash_type: bitcoin::sighash::TapSighashType::All,
     };
     psbt.inputs[0]
         .tap_script_sigs
@@ -746,8 +740,8 @@ fn extract_seller_sale_sig_success() {
     psbt.inputs[0].tap_script_sigs.insert(
         (seller_xonly, leaf_hash),
         taproot::Signature {
-            sig: schnorr_sig,
-            hash_ty: bitcoin::sighash::TapSighashType::SinglePlusAnyoneCanPay,
+            signature: schnorr_sig,
+            sighash_type: bitcoin::sighash::TapSighashType::SinglePlusAnyoneCanPay,
         },
     );
 
@@ -998,8 +992,8 @@ fn finalize_multisig_missing_marketplace_sig_errors() {
         &seller_keypair,
     );
     let seller_tap_sig = taproot::Signature {
-        sig: seller_schnorr_sig,
-        hash_ty: bitcoin::sighash::TapSighashType::SinglePlusAnyoneCanPay,
+        signature: seller_schnorr_sig,
+        sighash_type: bitcoin::sighash::TapSighashType::SinglePlusAnyoneCanPay,
     };
     psbt.inputs[0]
         .tap_script_sigs
@@ -1080,7 +1074,7 @@ fn e2e_protected_sale_presignature_flow() {
     let inscription_input = spendable_input(
         FAKE_TXID,
         0,
-        MIN_SELF_FUNDED + 100,
+        MIN_SELF_FUNDED + 200,
         p2wpkh_script(&seller_secret),
     );
     let locking_result = build_locking_psbt(&LockingPsbtRequest {
@@ -1129,8 +1123,8 @@ fn e2e_protected_sale_presignature_flow() {
     sale_template.inputs[0].tap_script_sigs.insert(
         (seller_xonly, leaf_hash),
         taproot::Signature {
-            sig: seller_schnorr_sig,
-            hash_ty: bitcoin::sighash::TapSighashType::SinglePlusAnyoneCanPay,
+            signature: seller_schnorr_sig,
+            sighash_type: bitcoin::sighash::TapSighashType::SinglePlusAnyoneCanPay,
         },
     );
 
