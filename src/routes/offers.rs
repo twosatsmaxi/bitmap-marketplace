@@ -7,7 +7,7 @@ use crate::{
     models::sale::Sale,
     services::psbt::{
         apply_marketplace_signature, calculate_marketplace_fee, finalize_and_extract,
-        finalize_multisig_and_extract,
+        finalize_multisig_and_extract, txid_from_raw_hex,
     },
     ws::WsEvent,
     AppState,
@@ -169,20 +169,8 @@ async fn accept_offer(
         rpc.verify_inputs_unspent(locking_raw_tx)
             .map_err(|e| AppError::Conflict(e.to_string()))?;
 
-        let lock_txid = {
-            let tx_bytes = hex::decode(locking_raw_tx)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad locking hex: {e}")))?;
-            let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&tx_bytes)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad locking tx: {e}")))?;
-            tx.compute_txid().to_string()
-        };
-        let sale_txid = {
-            let tx_bytes = hex::decode(&sale_raw_tx)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad sale hex: {e}")))?;
-            let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&tx_bytes)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad sale tx: {e}")))?;
-            tx.compute_txid().to_string()
-        };
+        let lock_txid = txid_from_raw_hex(locking_raw_tx).map_err(AppError::Internal)?;
+        let sale_txid = txid_from_raw_hex(&sale_raw_tx).map_err(AppError::Internal)?;
 
         rpc.submit_package(&[locking_raw_tx, &sale_raw_tx])
             .map_err(AppError::Internal)?;

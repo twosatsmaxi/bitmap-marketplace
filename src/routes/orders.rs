@@ -6,8 +6,8 @@ use crate::{
     models::sale::Sale,
     services::psbt::{
         apply_marketplace_signature, build_buy_psbt, build_protected_sale_psbt,
-        calculate_marketplace_fee, finalize_and_extract, finalize_multisig_and_extract, BuyRequest,
-        ProtectedSalePsbtRequest, SpendableInput, WitnessUtxo,
+        calculate_marketplace_fee, finalize_and_extract, finalize_multisig_and_extract,
+        txid_from_raw_hex, BuyRequest, ProtectedSalePsbtRequest, SpendableInput,
     },
     ws::WsEvent,
     AppState,
@@ -62,7 +62,9 @@ async fn buy(
             ))
         })?;
         let seller_pubkey = listing.seller_pubkey.ok_or_else(|| {
-            AppError::Internal(anyhow::anyhow!("listing is active but missing seller_pubkey"))
+            AppError::Internal(anyhow::anyhow!(
+                "listing is active but missing seller_pubkey"
+            ))
         })?;
 
         let buyer_funding_input = req.buyer_funding_input.as_ref().ok_or_else(|| {
@@ -84,7 +86,7 @@ async fn buy(
             seller_sale_sig_hex: listing.seller_sale_sig,
         };
 
-        let result = build_protected_sale_psbt(&psbt_req).map_err(|e| AppError::Internal(e))?;
+        let result = build_protected_sale_psbt(&psbt_req).map_err(AppError::Internal)?;
 
         return Ok(Json(serde_json::json!({
             "psbt": result.psbt_hex,
@@ -113,7 +115,7 @@ async fn buy(
         marketplace_fee_bps: state.marketplace_fee_bps,
     };
 
-    let result = build_buy_psbt(&buy_req).map_err(|e| AppError::Internal(e))?;
+    let result = build_buy_psbt(&buy_req).map_err(AppError::Internal)?;
 
     Ok(Json(serde_json::json!({
         "psbt": result.psbt_hex,
@@ -127,8 +129,6 @@ async fn buy(
 struct ConfirmOrderRequest {
     listing_id: Uuid,
     signed_psbt: String,
-    /// Required for protected purchases: the locking txid (from /buy response).
-    locking_txid: Option<String>,
     /// buyer_address is needed to populate the Sale row.
     buyer_address: Option<String>,
 }
@@ -147,7 +147,7 @@ async fn confirm_order(
         .map_err(AppError::Internal)?;
     let listing = listing.ok_or_else(|| AppError::NotFound("Listing not found".to_string()))?;
 
-    let rpc = crate::services::bitcoin_rpc::BitcoinRpc::new().map_err(|e| AppError::Internal(e))?;
+    let rpc = crate::services::bitcoin_rpc::BitcoinRpc::new().map_err(AppError::Internal)?;
 
     let buyer_address = req.buyer_address.unwrap_or_else(|| "unknown".to_string());
 
@@ -165,14 +165,14 @@ async fn confirm_order(
 
         let cosigned_psbt =
             apply_marketplace_signature(&req.signed_psbt, &state.marketplace_keypair)
-                .map_err(|e| AppError::Internal(e))?;
+                .map_err(AppError::Internal)?;
 
         let sale_raw_tx = finalize_multisig_and_extract(
             &cosigned_psbt,
             &seller_pubkey,
             &state.marketplace_keypair.pubkey_hex(),
         )
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(AppError::Internal)?;
 
         // Pre-broadcast UTXO liveness check: verify locking tx inputs are still unspent.
         rpc.verify_inputs_unspent(&locking_raw_tx)
@@ -180,23 +180,11 @@ async fn confirm_order(
 
         // Compute txids from raw hex before broadcast so we don't depend on
         // HashMap iteration order from submitpackage's tx-results.
-        let locking_txid = {
-            let tx_bytes = hex::decode(&locking_raw_tx)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad locking hex: {e}")))?;
-            let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&tx_bytes)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad locking tx: {e}")))?;
-            tx.compute_txid().to_string()
-        };
-        let sale_txid = {
-            let tx_bytes = hex::decode(&sale_raw_tx)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad sale hex: {e}")))?;
-            let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&tx_bytes)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("bad sale tx: {e}")))?;
-            tx.compute_txid().to_string()
-        };
+        let locking_txid = txid_from_raw_hex(&locking_raw_tx).map_err(AppError::Internal)?;
+        let sale_txid = txid_from_raw_hex(&sale_raw_tx).map_err(AppError::Internal)?;
 
         rpc.submit_package(&[&locking_raw_tx, &sale_raw_tx])
-            .map_err(|e| AppError::Internal(e))?;
+            .map_err(AppError::Internal)?;
 
         // Wrap all DB writes in a transaction for atomicity.
         let mut tx = state.db.pool.begin().await.map_err(AppError::Database)?;
@@ -253,7 +241,7 @@ async fn confirm_order(
     }
 
     // Legacy flow: finalize and broadcast via sendrawtransaction.
-    let raw_tx = finalize_and_extract(&req.signed_psbt).map_err(|e| AppError::Internal(e))?;
+    let raw_tx = finalize_and_extract(&req.signed_psbt).map_err(AppError::Internal)?;
 
     let tx_id = rpc
         .broadcast_transaction(&raw_tx)

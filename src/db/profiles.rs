@@ -36,10 +36,7 @@ impl Database {
     }
 
     /// Get profile by any linked ordinals address
-    pub async fn get_profile_by_address(
-        &self,
-        ordinals_address: &str,
-    ) -> Result<Option<Profile>> {
+    pub async fn get_profile_by_address(&self, ordinals_address: &str) -> Result<Option<Profile>> {
         let profile = sqlx::query_as::<_, Profile>(
             "SELECT p.* FROM profiles p \
              JOIN profile_wallets pw ON p.id = pw.profile_id \
@@ -92,13 +89,11 @@ impl Database {
             return Ok(false);
         }
 
-        sqlx::query(
-            "DELETE FROM profile_wallets WHERE profile_id = $1 AND ordinals_address = $2",
-        )
-        .bind(profile_id)
-        .bind(ordinals_address)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("DELETE FROM profile_wallets WHERE profile_id = $1 AND ordinals_address = $2")
+            .bind(profile_id)
+            .bind(ordinals_address)
+            .execute(&self.pool)
+            .await?;
 
         Ok(true)
     }

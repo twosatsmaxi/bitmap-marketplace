@@ -13,8 +13,8 @@ use bitcoin::{
     secp256k1::{self, PublicKey, XOnlyPublicKey},
     sighash::TapSighashType,
     taproot::{self, ControlBlock, LeafVersion, TaprootBuilder},
-    Address, Amount, Network, OutPoint, ScriptBuf, Sequence, TapLeafHash, Transaction, TxIn,
-    TxOut, Txid, Witness,
+    Address, Amount, Network, OutPoint, ScriptBuf, Sequence, TapLeafHash, Transaction, TxIn, TxOut,
+    Txid, Witness,
 };
 use std::str::FromStr;
 
@@ -693,12 +693,8 @@ pub fn build_locking_psbt(req: &LockingPsbtRequest) -> Result<LockingPsbt> {
     let seller_addr = Address::from_str(&req.seller_address)
         .map_err(|e| anyhow!("invalid seller_address: {}", e))?
         .assume_checked();
-    let sale_template = build_sale_template_psbt(
-        &encode_psbt(&psbt),
-        &multisig,
-        &seller_addr,
-        req.price_sats,
-    )?;
+    let sale_template =
+        build_sale_template_psbt(&encode_psbt(&psbt), &multisig, &seller_addr, req.price_sats)?;
 
     Ok(LockingPsbt {
         psbt_hex: encode_psbt(&psbt),
@@ -721,7 +717,7 @@ fn build_sale_template_psbt(
     price_sats: u64,
 ) -> Result<String> {
     let locking_psbt = decode_psbt(locking_psbt_hex)?;
-    let locking_txid = locking_psbt.unsigned_tx.txid();
+    let locking_txid = locking_psbt.unsigned_tx.compute_txid();
     let multisig_txout = locking_psbt
         .unsigned_tx
         .output
@@ -753,12 +749,12 @@ fn build_sale_template_psbt(
     ));
     psbt.inputs[0].witness_utxo = Some(multisig_txout);
     psbt.inputs[0].tap_internal_key = Some(multisig.internal_key);
-    psbt.inputs[0].tap_merkle_root = Some(
-        TapLeafHash::from_script(&multisig.leaf_script, LeafVersion::TapScript).into(),
+    psbt.inputs[0].tap_merkle_root =
+        Some(TapLeafHash::from_script(&multisig.leaf_script, LeafVersion::TapScript).into());
+    psbt.inputs[0].tap_scripts.insert(
+        multisig.control_block.clone(),
+        (multisig.leaf_script.clone(), LeafVersion::TapScript),
     );
-    psbt.inputs[0]
-        .tap_scripts
-        .insert(multisig.control_block.clone(), (multisig.leaf_script.clone(), LeafVersion::TapScript));
 
     Ok(encode_psbt(&psbt))
 }
@@ -781,7 +777,9 @@ pub fn extract_seller_sale_sig(
         .iter()
         .find(|((pk, _leaf_hash), _sig)| *pk == seller_xonly)
         .map(|(_, sig)| sig)
-        .ok_or_else(|| anyhow!("seller taproot signature missing from sale template PSBT input 0"))?;
+        .ok_or_else(|| {
+            anyhow!("seller taproot signature missing from sale template PSBT input 0")
+        })?;
 
     Ok(hex::encode(sig.to_vec()))
 }
@@ -905,9 +903,8 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
 
     psbt.inputs[0].witness_utxo = Some(multisig_txout);
     psbt.inputs[0].tap_internal_key = Some(internal_key);
-    psbt.inputs[0].tap_merkle_root = Some(
-        TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript).into(),
-    );
+    psbt.inputs[0].tap_merkle_root =
+        Some(TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript).into());
     psbt.inputs[0]
         .tap_scripts
         .insert(control_block, (leaf_script.clone(), LeafVersion::TapScript));
@@ -916,8 +913,8 @@ pub fn build_protected_sale_psbt(req: &ProtectedSalePsbtRequest) -> Result<Prote
 
     // Embed the seller's pre-signed Schnorr tap_script_sig (produced at listing time).
     if let Some(ref sig_hex) = req.seller_sale_sig_hex {
-        let sig_bytes = hex::decode(sig_hex)
-            .map_err(|e| anyhow!("invalid seller_sale_sig_hex: {}", e))?;
+        let sig_bytes =
+            hex::decode(sig_hex).map_err(|e| anyhow!("invalid seller_sale_sig_hex: {}", e))?;
         let schnorr_sig = taproot::Signature::from_slice(&sig_bytes)
             .map_err(|e| anyhow!("invalid seller Schnorr signature: {}", e))?;
         let seller_xonly = XOnlyPublicKey::from(seller_pk);
@@ -1095,6 +1092,14 @@ pub fn decode_psbt(hex: &str) -> Result<Psbt> {
 
 pub fn encode_psbt(psbt: &Psbt) -> String {
     hex::encode(psbt.serialize())
+}
+
+/// Decode a raw transaction hex string and return its txid.
+pub fn txid_from_raw_hex(raw_hex: &str) -> Result<String> {
+    let bytes = hex::decode(raw_hex).map_err(|e| anyhow!("invalid tx hex: {e}"))?;
+    let tx: Transaction =
+        bitcoin::consensus::deserialize(&bytes).map_err(|e| anyhow!("invalid tx: {e}"))?;
+    Ok(tx.compute_txid().to_string())
 }
 
 #[cfg(test)]

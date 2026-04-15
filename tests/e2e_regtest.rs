@@ -25,8 +25,8 @@ async fn json_response(router: &axum::Router, req: Request<Body>) -> (StatusCode
     let response = router.clone().oneshot(req).await.unwrap();
     let status = response.status();
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let body: Value =
-        serde_json::from_slice(&body_bytes).unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&body_bytes).to_string()}));
+    let body: Value = serde_json::from_slice(&body_bytes)
+        .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&body_bytes).to_string()}));
     (status, body)
 }
 
@@ -88,7 +88,7 @@ async fn test_unprotected_buy_flow() {
     // Create a UTXO that simulates an "inscription" the seller owns.
     let seller_addr = rpc.new_address();
     let inscription_txid = rpc.fund_address(&seller_addr, 0.001); // 100,000 sats
-    // Find the vout that pays to the seller
+                                                                  // Find the vout that pays to the seller
     let inscription_tx = rpc.get_raw_transaction(&inscription_txid);
     let inscription_vout = inscription_tx
         .output
@@ -127,8 +127,7 @@ async fn test_unprotected_buy_flow() {
     let listing_id = body["id"].as_str().expect("missing listing id");
 
     // --- Verify listing ---
-    let (status, body) =
-        json_response(&router, get(&format!("/api/listings/{listing_id}"))).await;
+    let (status, body) = json_response(&router, get(&format!("/api/listings/{listing_id}"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "Active");
     assert_eq!(body["protection_status"], "none");
@@ -142,8 +141,7 @@ async fn test_unprotected_buy_flow() {
         .iter()
         .position(|o| o.script_pubkey == buyer_addr.script_pubkey())
         .expect("buyer output not found") as u32;
-    let (buyer_script_hex, buyer_value_sats) =
-        rpc.get_utxo_info(&buyer_funding_txid, buyer_vout);
+    let (buyer_script_hex, buyer_value_sats) = rpc.get_utxo_info(&buyer_funding_txid, buyer_vout);
 
     // --- Build buy PSBT via API ---
     let buy_body = json!({
@@ -187,12 +185,13 @@ async fn test_unprotected_buy_flow() {
         json_response(&router, post_json("/api/orders/confirm", &confirm_body)).await;
     assert_eq!(status, StatusCode::OK, "confirm order failed: {body}");
     assert_eq!(body["status"], "broadcast");
-    let tx_id = body["tx_id"].as_str().expect("missing tx_id in confirm response");
+    let tx_id = body["tx_id"]
+        .as_str()
+        .expect("missing tx_id in confirm response");
     assert!(!tx_id.is_empty(), "tx_id should not be empty");
 
     // --- Verify listing is sold ---
-    let (status, body) =
-        json_response(&router, get(&format!("/api/listings/{listing_id}"))).await;
+    let (status, body) = json_response(&router, get(&format!("/api/listings/{listing_id}"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "Sold");
 
@@ -261,11 +260,13 @@ async fn test_protected_buy_flow() {
         },
     });
     let (status, body) = json_response(&router, post_json("/api/listings", &create_body)).await;
-    assert_eq!(status, StatusCode::OK, "create protected listing failed: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create protected listing failed: {body}"
+    );
     let listing_id = body["id"].as_str().expect("missing listing id");
-    let locking_psbt_hex = body["locking_psbt"]
-        .as_str()
-        .expect("missing locking_psbt");
+    let locking_psbt_hex = body["locking_psbt"].as_str().expect("missing locking_psbt");
     let sale_template_psbt_hex = body["sale_template_psbt"]
         .as_str()
         .expect("missing sale_template_psbt");
@@ -294,8 +295,10 @@ async fn test_protected_buy_flow() {
         .next()
         .expect("sale template missing tap_scripts")
         .clone();
-    let leaf_hash =
-        bitcoin::taproot::TapLeafHash::from_script(&leaf_script, bitcoin::taproot::LeafVersion::TapScript);
+    let leaf_hash = bitcoin::taproot::TapLeafHash::from_script(
+        &leaf_script,
+        bitcoin::taproot::LeafVersion::TapScript,
+    );
     let witness_utxo = sale_template_psbt.inputs[0]
         .witness_utxo
         .as_ref()
@@ -331,7 +334,10 @@ async fn test_protected_buy_flow() {
     });
     let (status, body) = json_response(
         &router,
-        post_json(&format!("/api/listings/{listing_id}/submit-locking"), &submit_body),
+        post_json(
+            &format!("/api/listings/{listing_id}/submit-locking"),
+            &submit_body,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "submit-locking failed: {body}");
@@ -351,8 +357,7 @@ async fn test_protected_buy_flow() {
         .iter()
         .position(|o| o.script_pubkey == buyer_addr.script_pubkey())
         .unwrap() as u32;
-    let (buyer_script_hex, buyer_value_sats) =
-        rpc.get_utxo_info(&buyer_funding_txid, buyer_vout);
+    let (buyer_script_hex, buyer_value_sats) = rpc.get_utxo_info(&buyer_funding_txid, buyer_vout);
 
     // --- Build buy PSBT via API ---
     let buy_body = json!({
@@ -392,12 +397,14 @@ async fn test_protected_buy_flow() {
     });
     let (status, body) =
         json_response(&router, post_json("/api/orders/confirm", &confirm_body)).await;
-    assert_eq!(status, StatusCode::OK, "confirm protected order failed: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "confirm protected order failed: {body}"
+    );
     assert_eq!(body["status"], "broadcast");
 
-    let sale_tx_id = body["sale_tx_id"]
-        .as_str()
-        .expect("missing sale_tx_id");
+    let sale_tx_id = body["sale_tx_id"].as_str().expect("missing sale_tx_id");
     let locking_tx_id = body["locking_tx_id"]
         .as_str()
         .expect("missing locking_tx_id");
@@ -545,5 +552,9 @@ async fn test_buy_locking_pending_listing() {
         },
     });
     let (status, body) = json_response(&router, post_json("/api/orders/buy", &buy_body)).await;
-    assert_eq!(status, StatusCode::CONFLICT, "expected 409 for locking_pending listing: {body}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "expected 409 for locking_pending listing: {body}"
+    );
 }

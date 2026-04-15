@@ -176,7 +176,7 @@ impl Database {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT trait, COUNT(*) as count FROM (
                 SELECT unnest(traits) as trait FROM bitmaps WHERE inscription_id = ANY($1)
-            ) t GROUP BY trait ORDER BY count DESC"
+            ) t GROUP BY trait ORDER BY count DESC",
         )
         .bind(ids)
         .fetch_all(&self.pool)
@@ -237,7 +237,7 @@ impl Database {
     ) -> Result<i64> {
         let count: i64 = if trait_name == "punk" {
             sqlx::query_scalar(
-                "SELECT COUNT(*) FROM bitmaps WHERE inscription_id = ANY($1) AND traits && $2"
+                "SELECT COUNT(*) FROM bitmaps WHERE inscription_id = ANY($1) AND traits && $2",
             )
             .bind(ids)
             .bind(PUNK_TRAITS)
@@ -245,7 +245,7 @@ impl Database {
             .await?
         } else if trait_name == "perfect_punk" {
             sqlx::query_scalar(
-                "SELECT COUNT(*) FROM bitmaps WHERE inscription_id = ANY($1) AND traits && $2"
+                "SELECT COUNT(*) FROM bitmaps WHERE inscription_id = ANY($1) AND traits && $2",
             )
             .bind(ids)
             .bind(PERFECT_PUNK_TRAITS)
@@ -264,10 +264,7 @@ impl Database {
     }
 
     /// Get just block heights for a set of inscription IDs (lightweight for bitfield)
-    pub async fn get_block_heights_by_inscription_ids(
-        &self,
-        ids: &[String],
-    ) -> Result<Vec<i64>> {
+    pub async fn get_block_heights_by_inscription_ids(&self, ids: &[String]) -> Result<Vec<i64>> {
         let heights: Vec<i64> = sqlx::query_scalar(
             "SELECT block_height FROM bitmaps WHERE inscription_id = ANY($1) ORDER BY block_height ASC"
         )

@@ -55,14 +55,8 @@ impl BitcoinRpc {
         Ok(tx)
     }
 
-    /// Decodes a hex-encoded raw transaction, broadcasts it to the network,
-    /// and returns the resulting txid as a string.
+    /// Broadcasts a hex-encoded raw transaction and returns the resulting txid.
     pub fn broadcast_transaction(&self, raw_tx_hex: &str) -> Result<String> {
-        // Decode hex into bytes and deserialize to verify the transaction is valid.
-        let raw_bytes = hex::decode(raw_tx_hex)?;
-        let _tx: Transaction = deserialize(&raw_bytes)?;
-
-        // Send the raw hex string; the RPC client accepts anything implementing RawTx.
         let txid = self.client.send_raw_transaction(raw_tx_hex)?;
         Ok(txid.to_string())
     }
@@ -102,25 +96,6 @@ impl BitcoinRpc {
                 }))
             }
         }
-    }
-
-    /// Verify all inputs of a locking transaction are still unspent.
-    /// Returns an error describing the first spent input, or Ok(()) if all are live.
-    pub fn verify_locking_tx_inputs_unspent(&self, locking_raw_tx_hex: &str) -> Result<()> {
-        let locking_tx: Transaction = deserialize(
-            &hex::decode(locking_raw_tx_hex)?,
-        )?;
-        for input in &locking_tx.input {
-            let txid = input.previous_output.txid.to_string();
-            let vout = input.previous_output.vout;
-            if self.get_utxo_info(&txid, vout)?.is_none() {
-                return Err(anyhow!(
-                    "locking tx input {}:{} is already spent; seller may have moved the inscription",
-                    txid, vout
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// Estimates the fee rate for confirmation within `target_blocks` blocks.
@@ -174,10 +149,9 @@ impl BitcoinRpc {
     /// Verifies that all inputs of a raw transaction hex are still unspent UTXOs.
     /// Returns an error describing the first spent input found.
     pub fn verify_inputs_unspent(&self, raw_tx_hex: &str) -> Result<()> {
-        let raw_bytes = hex::decode(raw_tx_hex)
-            .map_err(|e| anyhow!("invalid tx hex: {}", e))?;
-        let tx: Transaction = deserialize(&raw_bytes)
-            .map_err(|e| anyhow!("invalid transaction: {}", e))?;
+        let raw_bytes = hex::decode(raw_tx_hex).map_err(|e| anyhow!("invalid tx hex: {}", e))?;
+        let tx: Transaction =
+            deserialize(&raw_bytes).map_err(|e| anyhow!("invalid transaction: {}", e))?;
         for input in &tx.input {
             let txid = input.previous_output.txid.to_string();
             let vout = input.previous_output.vout;
@@ -209,9 +183,10 @@ impl BitcoinRpc {
                     .into_iter()
                     .flat_map(|m| m.iter())
                     .filter_map(|(wtxid, detail)| {
-                        detail.get("error").and_then(|e| e.as_str()).map(|err| {
-                            format!("{}: {}", wtxid, err)
-                        })
+                        detail
+                            .get("error")
+                            .and_then(|e| e.as_str())
+                            .map(|err| format!("{}: {}", wtxid, err))
                     })
                     .collect();
                 return Err(anyhow!(
@@ -232,11 +207,7 @@ impl BitcoinRpc {
         let mut accepted_txids = Vec::new();
         for (wtxid, detail) in tx_results {
             if let Some(err) = detail.get("error").and_then(|e| e.as_str()) {
-                return Err(anyhow!(
-                    "submitpackage tx {} rejected: {}",
-                    wtxid,
-                    err
-                ));
+                return Err(anyhow!("submitpackage tx {} rejected: {}", wtxid, err));
             }
             // Use the "txid" field if present, otherwise fall back to the key (wtxid).
             let txid = detail

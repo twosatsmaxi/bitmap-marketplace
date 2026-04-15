@@ -5,12 +5,12 @@ use super::{
     BuyRequest, ListingRequest, LockingPsbtRequest, ProtectedSalePsbtRequest, SpendableInput,
     WitnessUtxo, MIN_MARKETPLACE_FEE_SATS, MIN_SELF_FUNDED,
 };
+use bitcoin::taproot::LeafVersion;
 use bitcoin::{
     ecdsa, hashes::Hash, key::TapTweak, opcodes::all as op, psbt::Psbt, secp256k1,
     sighash::SighashCache, taproot, Address, Amount, Network, ScriptBuf, Sequence, TapLeafHash,
     Transaction, TxIn, TxOut, Witness,
 };
-use bitcoin::taproot::LeafVersion;
 use std::str::FromStr;
 
 const FAKE_TXID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -554,7 +554,6 @@ fn finalize_multisig_and_extract_finalizes_buyer_input_too() {
     assert_eq!(tx.input[1].witness.len(), 2);
 }
 
-
 // === create_taproot_multisig direct tests ===
 
 #[test]
@@ -712,9 +711,10 @@ fn extract_seller_sale_sig_success() {
         script_pubkey: multisig.output_script.clone(),
     });
     psbt.inputs[0].tap_internal_key = Some(multisig.internal_key);
-    psbt.inputs[0]
-        .tap_scripts
-        .insert(multisig.control_block.clone(), (multisig.leaf_script.clone(), LeafVersion::TapScript));
+    psbt.inputs[0].tap_scripts.insert(
+        multisig.control_block.clone(),
+        (multisig.leaf_script.clone(), LeafVersion::TapScript),
+    );
 
     // Compute sighash and sign with Schnorr
     let leaf_hash = TapLeafHash::from_script(&multisig.leaf_script, LeafVersion::TapScript);
@@ -833,9 +833,10 @@ fn apply_marketplace_signature_success() {
         value: Amount::from_sat(100_000),
         script_pubkey: multisig.output_script.clone(),
     });
-    psbt.inputs[0]
-        .tap_scripts
-        .insert(multisig.control_block.clone(), (multisig.leaf_script.clone(), LeafVersion::TapScript));
+    psbt.inputs[0].tap_scripts.insert(
+        multisig.control_block.clone(),
+        (multisig.leaf_script.clone(), LeafVersion::TapScript),
+    );
 
     // Verify the PSBT is set up correctly for the marketplace to sign
     assert!(!psbt.inputs[0].tap_scripts.is_empty());
@@ -903,9 +904,10 @@ fn finalize_multisig_missing_seller_sig_errors() {
         value: Amount::from_sat(100_000),
         script_pubkey: multisig.output_script.clone(),
     });
-    psbt.inputs[0]
-        .tap_scripts
-        .insert(multisig.control_block.clone(), (multisig.leaf_script.clone(), LeafVersion::TapScript));
+    psbt.inputs[0].tap_scripts.insert(
+        multisig.control_block.clone(),
+        (multisig.leaf_script.clone(), LeafVersion::TapScript),
+    );
 
     let err = finalize_multisig_and_extract(
         &encode_psbt(&psbt),
@@ -961,7 +963,12 @@ fn finalize_multisig_missing_marketplace_sig_errors() {
             seller_pubkey_hex: seller_pubkey.to_string(),
             price_sats: 50_000,
             buyer_address: BUYER_ADDR.to_string(),
-            buyer_funding_input: spendable_input(FAKE_TXID_2, 1, 200_000, p2wpkh_script(&buyer_secret)),
+            buyer_funding_input: spendable_input(
+                FAKE_TXID_2,
+                1,
+                200_000,
+                p2wpkh_script(&buyer_secret),
+            ),
             fee_rate_sat_vb: 5.0,
             marketplace_fee_address: None,
             marketplace_fee_bps: 0,
@@ -1006,7 +1013,9 @@ fn finalize_multisig_missing_marketplace_sig_errors() {
     )
     .unwrap_err();
 
-    assert!(err.to_string().contains("marketplace taproot signature missing"));
+    assert!(err
+        .to_string()
+        .contains("marketplace taproot signature missing"));
 }
 
 #[test]
@@ -1050,9 +1059,8 @@ fn finalize_multisig_invalid_pubkey_hex_errors() {
     })
     .unwrap();
 
-    let err =
-        finalize_multisig_and_extract(&encode_psbt(&psbt), "invalid", &"invalid".to_string())
-            .unwrap_err();
+    let err = finalize_multisig_and_extract(&encode_psbt(&psbt), "invalid", &"invalid".to_string())
+        .unwrap_err();
     assert!(err.to_string().contains("invalid seller_pubkey_hex"));
 }
 
@@ -1129,11 +1137,8 @@ fn e2e_protected_sale_presignature_flow() {
     );
 
     // Step 4: Extract seller sale sig.
-    let sig_hex = extract_seller_sale_sig(
-        &encode_psbt(&sale_template),
-        &seller_pubkey.to_string(),
-    )
-    .unwrap();
+    let sig_hex =
+        extract_seller_sale_sig(&encode_psbt(&sale_template), &seller_pubkey.to_string()).unwrap();
 
     // Step 5: Build protected sale PSBT with the extracted seller sig.
     let buyer_input = spendable_input(FAKE_TXID_2, 1, 200_000, p2wpkh_script(&buyer_secret));
@@ -1159,11 +1164,8 @@ fn e2e_protected_sale_presignature_flow() {
 
     // Step 7: Apply marketplace Schnorr co-signature.
     let marketplace_kp = MarketplaceKeypair::from_secret_key(marketplace_secret);
-    let cosigned_hex = apply_marketplace_signature(
-        &encode_psbt(&sale_psbt),
-        &marketplace_kp,
-    )
-    .unwrap();
+    let cosigned_hex =
+        apply_marketplace_signature(&encode_psbt(&sale_psbt), &marketplace_kp).unwrap();
 
     // Step 8: Finalize and extract.
     let raw_tx = finalize_multisig_and_extract(
@@ -1176,10 +1178,18 @@ fn e2e_protected_sale_presignature_flow() {
 
     // Verify: Taproot script-path witness has 4 elements on input[0].
     // [seller_sig, marketplace_sig, leaf_script, control_block]
-    assert_eq!(tx.input[0].witness.len(), 4, "expected 4-element taproot script-path witness");
+    assert_eq!(
+        tx.input[0].witness.len(),
+        4,
+        "expected 4-element taproot script-path witness"
+    );
 
     // Verify: P2WPKH witness has 2 elements on input[1].
-    assert_eq!(tx.input[1].witness.len(), 2, "expected 2-element P2WPKH witness");
+    assert_eq!(
+        tx.input[1].witness.len(),
+        2,
+        "expected 2-element P2WPKH witness"
+    );
 
     // Verify: output[0] pays the seller the correct price.
     let seller_addr = Address::from_str(SELLER_ADDR).unwrap().assume_checked();

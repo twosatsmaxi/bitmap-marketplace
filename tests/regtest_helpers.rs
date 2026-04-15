@@ -10,8 +10,8 @@ use bitcoin::Network;
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use secrecy::SecretString;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers::runners::AsyncRunner;
 use testcontainers::core::WaitFor;
+use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use testcontainers_modules::postgres::Postgres;
 
@@ -206,18 +206,10 @@ impl RpcHelper {
 
     /// Lock a UTXO so the wallet won't spend it in other transactions.
     pub fn lock_utxo(&self, txid: &bitcoin::Txid, vout: u32) {
-        let outpoint = bitcoin::OutPoint {
-            txid: *txid,
-            vout,
-        };
+        let outpoint = bitcoin::OutPoint { txid: *txid, vout };
         self.client
             .lock_unspent(&[outpoint])
             .expect("failed to lock UTXO");
-    }
-
-    /// Get the underlying RPC client.
-    pub fn client(&self) -> &Client {
-        &self.client
     }
 }
 
@@ -237,9 +229,7 @@ pub async fn build_test_state(infra: &TestInfra) -> AppState {
         .expect("failed to connect to test postgres");
 
     let db = Database { pool };
-    db.run_migrations()
-        .await
-        .expect("failed to run migrations");
+    db.run_migrations().await.expect("failed to run migrations");
 
     let marketplace_keypair =
         MarketplaceKeypair::from_env().expect("failed to create marketplace keypair");
@@ -269,12 +259,14 @@ pub fn build_test_router(state: AppState) -> axum::Router {
         .nest("/api", bitmap_marketplace::routes::router())
         .route(
             "/health",
-            get(|axum::extract::State(s): axum::extract::State<AppState>| async move {
-                match sqlx::query("SELECT 1").execute(&s.db.pool).await {
-                    Ok(_) => axum::http::StatusCode::OK,
-                    Err(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                }
-            }),
+            get(
+                |axum::extract::State(s): axum::extract::State<AppState>| async move {
+                    match sqlx::query("SELECT 1").execute(&s.db.pool).await {
+                        Ok(_) => axum::http::StatusCode::OK,
+                        Err(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    }
+                },
+            ),
         )
         .with_state(state)
 }

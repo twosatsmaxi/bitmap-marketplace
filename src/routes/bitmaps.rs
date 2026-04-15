@@ -59,7 +59,9 @@ async fn get_bitmap_children(
         .get_bitmap_by_height(block_height)
         .await
         .map_err(AppError::Internal)?
-        .ok_or_else(|| AppError::NotFound(format!("Bitmap not found for block {}", block_height)))?;
+        .ok_or_else(|| {
+            AppError::NotFound(format!("Bitmap not found for block {}", block_height))
+        })?;
 
     let inscription_id = bitmap
         .inscription_id
@@ -83,9 +85,7 @@ async fn get_bitmap_children(
         .map(|child_index| {
             let client = state.ord_client.clone();
             let id = inscription_id.clone();
-            async move {
-                client.get_child_inscription(&id, child_index).await
-            }
+            async move { client.get_child_inscription(&id, child_index).await }
         })
         .collect();
 
@@ -117,7 +117,9 @@ async fn get_bitmap_details(
         .get_bitmap_by_height(block_height)
         .await
         .map_err(AppError::Internal)?
-        .ok_or_else(|| AppError::NotFound(format!("Bitmap not found for block {}", block_height)))?;
+        .ok_or_else(|| {
+            AppError::NotFound(format!("Bitmap not found for block {}", block_height))
+        })?;
 
     // Get inscription_id from bitmap
     let inscription_id = bitmap
@@ -125,15 +127,19 @@ async fn get_bitmap_details(
         .ok_or_else(|| AppError::NotFound(format!("No inscription for block {}", block_height)))?;
 
     // Call OrdClient to get inscription details
-    let ord_inscription = state.ord_client
+    let ord_inscription = state
+        .ord_client
         .get_inscription(&inscription_id)
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
 
     // Owner from address field (may be None)
-    let owner = ord_inscription
-        .address
-        .ok_or_else(|| AppError::NotFound(format!("No owner address for inscription {}", inscription_id)))?;
+    let owner = ord_inscription.address.ok_or_else(|| {
+        AppError::NotFound(format!(
+            "No owner address for inscription {}",
+            inscription_id
+        ))
+    })?;
 
     // Genesis height from ord response (use height field, fallback to genesis_height, then 0)
     let genesis_height = ord_inscription
