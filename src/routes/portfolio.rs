@@ -168,17 +168,28 @@ async fn get_portfolio(
         }));
     }
 
-    let trait_future = state.db.get_trait_counts_by_inscription_ids(&inscription_ids);
+    let trait_future = state
+        .db
+        .get_trait_counts_by_inscription_ids(&inscription_ids);
 
     let (bitmaps, total, trait_raw) = if let Some(ref trait_filter) = query.trait_filter {
         tokio::try_join!(
-            state.db.get_bitmaps_by_inscription_ids_and_trait(&inscription_ids, trait_filter, limit, offset),
-            state.db.count_bitmaps_by_inscription_ids_and_trait(&inscription_ids, trait_filter),
+            state.db.get_bitmaps_by_inscription_ids_and_trait(
+                &inscription_ids,
+                trait_filter,
+                limit,
+                offset
+            ),
+            state
+                .db
+                .count_bitmaps_by_inscription_ids_and_trait(&inscription_ids, trait_filter),
             trait_future,
         )
     } else {
         tokio::try_join!(
-            state.db.get_bitmaps_by_inscription_ids(&inscription_ids, limit, offset),
+            state
+                .db
+                .get_bitmaps_by_inscription_ids(&inscription_ids, limit, offset),
             state.db.count_bitmaps_by_inscription_ids(&inscription_ids),
             trait_future,
         )
@@ -406,10 +417,7 @@ async fn run_multi_portfolio(
         })
         .collect();
 
-    let results: Vec<_> = stream::iter(futs)
-        .buffer_unordered(10)
-        .collect()
-        .await;
+    let results: Vec<_> = stream::iter(futs).buffer_unordered(10).collect().await;
 
     const MAX_INSCRIPTION_IDS: usize = 50_000;
     let mut inscription_to_owner: std::collections::HashMap<String, String> =
@@ -432,7 +440,10 @@ async fn run_multi_portfolio(
     // Filter to a single wallet if requested
     if let Some(wallet) = wallet_filter {
         all_inscription_ids.retain(|id| {
-            inscription_to_owner.get(id).map(|o| o == wallet).unwrap_or(false)
+            inscription_to_owner
+                .get(id)
+                .map(|o| o == wallet)
+                .unwrap_or(false)
         });
     }
 
@@ -440,18 +451,31 @@ async fn run_multi_portfolio(
         return Ok((vec![], vec![], 0, page, false));
     }
 
-    let trait_future = state.db.get_trait_counts_by_inscription_ids(&all_inscription_ids);
+    let trait_future = state
+        .db
+        .get_trait_counts_by_inscription_ids(&all_inscription_ids);
 
     let (bitmaps, total, trait_raw) = if let Some(tf) = trait_filter {
         tokio::try_join!(
-            state.db.get_bitmaps_by_inscription_ids_and_trait(&all_inscription_ids, tf, limit, offset),
-            state.db.count_bitmaps_by_inscription_ids_and_trait(&all_inscription_ids, tf),
+            state.db.get_bitmaps_by_inscription_ids_and_trait(
+                &all_inscription_ids,
+                tf,
+                limit,
+                offset
+            ),
+            state
+                .db
+                .count_bitmaps_by_inscription_ids_and_trait(&all_inscription_ids, tf),
             trait_future,
         )
     } else {
         tokio::try_join!(
-            state.db.get_bitmaps_by_inscription_ids(&all_inscription_ids, limit, offset),
-            state.db.count_bitmaps_by_inscription_ids(&all_inscription_ids),
+            state
+                .db
+                .get_bitmaps_by_inscription_ids(&all_inscription_ids, limit, offset),
+            state
+                .db
+                .count_bitmaps_by_inscription_ids(&all_inscription_ids),
             trait_future,
         )
     }
@@ -491,11 +515,25 @@ async fn run_multi_portfolio(
 // Bitfield endpoints
 // ---------------------------------------------------------------------------
 
-fn bitfield_response(bitfield: Vec<u8>, total_blocks: usize, owned_count: usize, cache_control: &'static str) -> Response {
+fn bitfield_response(
+    bitfield: Vec<u8>,
+    total_blocks: usize,
+    owned_count: usize,
+    cache_control: &'static str,
+) -> Response {
     let mut headers = HeaderMap::new();
-    headers.insert("content-type", HeaderValue::from_static("application/octet-stream"));
-    headers.insert("x-total-blocks", HeaderValue::from_str(&total_blocks.to_string()).unwrap());
-    headers.insert("x-owned-count", HeaderValue::from_str(&owned_count.to_string()).unwrap());
+    headers.insert(
+        "content-type",
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    headers.insert(
+        "x-total-blocks",
+        HeaderValue::from_str(&total_blocks.to_string()).unwrap(),
+    );
+    headers.insert(
+        "x-owned-count",
+        HeaderValue::from_str(&owned_count.to_string()).unwrap(),
+    );
     headers.insert(CACHE_CONTROL, HeaderValue::from_static(cache_control));
     (StatusCode::OK, headers, Body::from(bitfield)).into_response()
 }
@@ -514,10 +552,7 @@ async fn build_bitfield(
         })
         .collect();
 
-    let results: Vec<_> = stream::iter(futs)
-        .buffer_unordered(10)
-        .collect()
-        .await;
+    let results: Vec<_> = stream::iter(futs).buffer_unordered(10).collect().await;
 
     let mut all_inscription_ids: Vec<String> = Vec::new();
     for result in results {
@@ -561,7 +596,12 @@ async fn get_portfolio_bitfield(
     Path(address): Path<String>,
 ) -> Result<Response, AppError> {
     let (bitfield, total, owned) = build_bitfield(&state, &[address]).await?;
-    Ok(bitfield_response(bitfield, total, owned, "public, max-age=60, stale-while-revalidate=30"))
+    Ok(bitfield_response(
+        bitfield,
+        total,
+        owned,
+        "public, max-age=60, stale-while-revalidate=30",
+    ))
 }
 
 async fn get_profile_bitfield(

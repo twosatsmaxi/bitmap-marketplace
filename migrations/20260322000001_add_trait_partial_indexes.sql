@@ -3,6 +3,12 @@
 -- ORDER BY block_height for free, causing full table scans + sorts (~18s).
 -- These partial indexes pre-filter by trait condition and are already sorted
 -- by block_height, enabling index-only scans (< 10ms).
+--
+-- The bitmaps table is created and populated externally (data import pipeline),
+-- so guard all statements to avoid failures in fresh/test environments.
+
+DO $$ BEGIN
+IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'bitmaps') THEN
 
 -- Grouped: all punk variants (11 traits) — used by filter=punks
 CREATE INDEX IF NOT EXISTS idx_bitmaps_trait_punk ON bitmaps (block_height)
@@ -50,3 +56,6 @@ CREATE INDEX IF NOT EXISTS idx_bitmaps_trait_repdigit ON bitmaps (block_height)
 WHERE traits @> ARRAY['repdigit']::text[];
 
 ANALYZE bitmaps;
+
+END IF;
+END $$;

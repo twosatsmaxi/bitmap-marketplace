@@ -47,7 +47,10 @@ impl MarketplaceKeypair {
     }
 
     /// Signs a 32-byte sighash using Schnorr (BIP 340) for Taproot script-path spending.
-    pub fn sign_schnorr(&self, sighash: &[u8; 32]) -> Result<bitcoin::secp256k1::schnorr::Signature> {
+    pub fn sign_schnorr(
+        &self,
+        sighash: &[u8; 32],
+    ) -> Result<bitcoin::secp256k1::schnorr::Signature> {
         let msg = Message::from_digest(*sighash);
         let keypair = Keypair::from_secret_key(&self.secp, &self.secret_key);
         let sig = self.secp.sign_schnorr(&msg, &keypair);
@@ -80,7 +83,7 @@ impl MarketplaceKeypair {
 }
 
 /// Test-only constructor — produces a valid but insecure keypair from a known seed.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl MarketplaceKeypair {
     pub fn for_testing() -> Arc<Self> {
         // 0x01 key: well-known test seed, valid for secp256k1 (far below curve order)

@@ -7,7 +7,7 @@ use crate::{
     models::sale::Sale,
     services::psbt::{
         apply_marketplace_signature, calculate_marketplace_fee, finalize_and_extract,
-        finalize_multisig_and_extract,
+        finalize_multisig_and_extract, txid_from_raw_hex,
     },
     ws::WsEvent,
     AppState,
@@ -169,17 +169,13 @@ async fn accept_offer(
         rpc.verify_inputs_unspent(locking_raw_tx)
             .map_err(|e| AppError::Conflict(e.to_string()))?;
 
-        let txids = rpc
-            .submit_package(&[locking_raw_tx, &sale_raw_tx])
+        let lock_txid = txid_from_raw_hex(locking_raw_tx).map_err(AppError::Internal)?;
+        let sale_txid = txid_from_raw_hex(&sale_raw_tx).map_err(AppError::Internal)?;
+
+        rpc.submit_package(&[locking_raw_tx, &sale_raw_tx])
             .map_err(AppError::Internal)?;
 
-        let sale_txid = txids
-            .last()
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-        let lock_txid = txids.first().cloned();
-
-        (sale_txid, lock_txid)
+        (sale_txid, Some(lock_txid))
     } else {
         // Unprotected flow: finalize and broadcast
         let raw_tx = finalize_and_extract(signed_psbt).map_err(AppError::Internal)?;

@@ -6,7 +6,7 @@ use crate::{
     services::magic_eden,
     services::psbt::{
         build_locking_psbt, decode_psbt, extract_seller_sale_sig, LockingPsbtRequest,
-        SpendableInput, WitnessUtxo,
+        SpendableInput,
     },
     ws::WsEvent,
     AppState,
@@ -133,42 +133,47 @@ async fn create_listing(
     Json(req): Json<CreateListingRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     // If seller_pubkey is provided, build the locking PSBT for mempool protection.
-    let (locking_psbt_hex, sale_template_psbt_hex, multisig_address, multisig_script, protection_status) =
-        if let Some(ref seller_pubkey_hex) = req.seller_pubkey {
-            // Validate the pubkey parses.
-            PublicKey::from_str(seller_pubkey_hex).map_err(|_| {
-                AppError::BadRequest(
-                    "seller_pubkey is not a valid secp256k1 compressed public key".to_string(),
-                )
-            })?;
-
-            let inscription_input = req.inscription_input.as_ref().ok_or_else(|| {
-                AppError::BadRequest("inscription_input required for protected listing".to_string())
-            })?;
-
-            let locking_req = LockingPsbtRequest {
-                inscription_input: SpendableInput::from(inscription_input),
-                gas_funding_input: req.gas_funding_input.as_ref().map(SpendableInput::from),
-                seller_pubkey_hex: seller_pubkey_hex.clone(),
-                seller_address: req.seller_address.clone(),
-                price_sats: req.price_sats as u64,
-                marketplace_pubkey_hex: state.marketplace_keypair.pubkey_hex(),
-                network: state.network,
-                min_relay_fee_rate_sat_vb: None,
-            };
-
-            let locking = build_locking_psbt(&locking_req).map_err(|e| AppError::Internal(e))?;
-
-            (
-                Some(locking.psbt_hex),
-                Some(locking.sale_template_psbt_hex),
-                Some(locking.multisig_address),
-                Some(locking.multisig_script_hex),
-                "locking_pending".to_string(),
+    let (
+        locking_psbt_hex,
+        sale_template_psbt_hex,
+        multisig_address,
+        multisig_script,
+        protection_status,
+    ) = if let Some(ref seller_pubkey_hex) = req.seller_pubkey {
+        // Validate the pubkey parses.
+        PublicKey::from_str(seller_pubkey_hex).map_err(|_| {
+            AppError::BadRequest(
+                "seller_pubkey is not a valid secp256k1 compressed public key".to_string(),
             )
-        } else {
-            (None, None, None, None, "none".to_string())
+        })?;
+
+        let inscription_input = req.inscription_input.as_ref().ok_or_else(|| {
+            AppError::BadRequest("inscription_input required for protected listing".to_string())
+        })?;
+
+        let locking_req = LockingPsbtRequest {
+            inscription_input: SpendableInput::from(inscription_input),
+            gas_funding_input: req.gas_funding_input.as_ref().map(SpendableInput::from),
+            seller_pubkey_hex: seller_pubkey_hex.clone(),
+            seller_address: req.seller_address.clone(),
+            price_sats: req.price_sats as u64,
+            marketplace_pubkey_hex: state.marketplace_keypair.pubkey_hex(),
+            network: state.network,
+            min_relay_fee_rate_sat_vb: None,
         };
+
+        let locking = build_locking_psbt(&locking_req).map_err(|e| AppError::Internal(e))?;
+
+        (
+            Some(locking.psbt_hex),
+            Some(locking.sale_template_psbt_hex),
+            Some(locking.multisig_address),
+            Some(locking.multisig_script_hex),
+            "locking_pending".to_string(),
+        )
+    } else {
+        (None, None, None, None, "none".to_string())
+    };
 
     let listing = Listing {
         id: Uuid::new_v4(),
@@ -336,7 +341,9 @@ async fn submit_locking(
     }
 
     let seller_pubkey = listing.seller_pubkey.as_deref().ok_or_else(|| {
-        AppError::Internal(anyhow::anyhow!("listing in locking_pending but missing seller_pubkey"))
+        AppError::Internal(anyhow::anyhow!(
+            "listing in locking_pending but missing seller_pubkey"
+        ))
     })?;
 
     // Validate it's a valid PSBT hex (structural check).

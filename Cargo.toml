@@ -3,6 +3,9 @@ name = "bitmap-marketplace"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+testing = []
+
 [dependencies]
 # Web framework
 axum = { version = "0.7", features = ["ws", "macros"] }
@@ -19,8 +22,8 @@ serde_json = "1"
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate"] }
 
 # Bitcoin
-bitcoin = { version = "0.31", features = ["serde"] }
-bitcoincore-rpc = "0.18"
+bitcoin = { version = "0.32", features = ["serde"] }
+bitcoincore-rpc = "0.19"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -46,3 +49,7 @@ moka = { version = "0.12", features = ["future"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
+testcontainers = "0.27.2"
+testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+serial_test = "3.4.0"
+base64 = "0.22.1"

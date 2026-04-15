@@ -20,4 +20,4 @@ CREATE INDEX idx_profile_wallets_ordinals_address ON profile_wallets(ordinals_ad
 CREATE TRIGGER set_profiles_updated_at
     BEFORE UPDATE ON profiles
     FOR EACH ROW
-    EXECUTE FUNCTION trigger_set_updated_at();
+    EXECUTE FUNCTION update_updated_at();

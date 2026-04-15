@@ -19,8 +19,7 @@ pub struct Database {
 
 impl Database {
     pub fn new() -> Result<Self> {
-        let url = std::env::var("DATABASE_URL")
-            .expect("DATABASE_URL must be set");
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
         let pool = PgPoolOptions::new()
             .max_connections(10)

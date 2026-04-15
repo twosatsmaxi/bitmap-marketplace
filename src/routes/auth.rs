@@ -1,7 +1,11 @@
 use async_trait::async_trait;
 use axum::{
     extract::{Path, Query, State},
-    http::{header::{CACHE_CONTROL, SET_COOKIE}, request::Parts, HeaderMap},
+    http::{
+        header::{CACHE_CONTROL, SET_COOKIE},
+        request::Parts,
+        HeaderMap,
+    },
     response::IntoResponse,
     routing::{delete, get, patch, post},
     Json, Router,
@@ -53,7 +57,7 @@ struct ChallengeQuery {
 }
 
 /// Validates a Bitcoin address string without requiring RPC.
-/// Returns true if the address is syntactically valid AND valid for the 
+/// Returns true if the address is syntactically valid AND valid for the
 /// specified network (mainnet, testnet, or regtest).
 fn validate_bitcoin_address(address: &str, network: Network) -> bool {
     // First, try to parse as an unchecked address (validates bech32 encoding, checksum)
@@ -61,7 +65,7 @@ fn validate_bitcoin_address(address: &str, network: Network) -> bool {
         Ok(a) => a,
         Err(_) => return false,
     };
-    
+
     // Check if the address is valid for the specified network
     unchecked.is_valid_for_network(network)
 }
@@ -134,11 +138,10 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
         .get("Cookie")
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| {
-            cookies.split(';')
-                .find_map(|c| {
-                    let c = c.trim();
-                    c.strip_prefix("bitmap_token=").map(|t| t.to_string())
-                })
+            cookies.split(';').find_map(|c| {
+                let c = c.trim();
+                c.strip_prefix("bitmap_token=").map(|t| t.to_string())
+            })
         })
 }
 
@@ -189,10 +192,7 @@ fn auth_response_with_cookie(auth_resp: AuthResponse, token: &str) -> impl IntoR
         token,
         30 * 24 * 60 * 60 // 30 days
     );
-    (
-        [(SET_COOKIE, cookie)],
-        Json(auth_resp),
-    )
+    ([(SET_COOKIE, cookie)], Json(auth_resp))
 }
 
 fn build_profile_response(profile: &Profile, wallets: &[ProfileWallet]) -> ProfileResponse {
@@ -243,14 +243,17 @@ async fn get_challenge(
         query.address, nonce, issued_at, expiration_time
     );
 
-    state.challenges.insert(
-        nonce.clone(),
-        Challenge {
-            message: message.clone(),
-            address: query.address,
-            expires_at,
-        },
-    ).await;
+    state
+        .challenges
+        .insert(
+            nonce.clone(),
+            Challenge {
+                message: message.clone(),
+                address: query.address,
+                expires_at,
+            },
+        )
+        .await;
 
     Ok((
         [(CACHE_CONTROL, "no-store, no-cache")],
@@ -325,8 +328,13 @@ async fn connect_wallet(
     // 3. Check if a profile already exists for this ordinals address.
     if let Some(profile) = db.get_profile_by_address(&body.ordinals_address).await? {
         let wallets = db.get_profile_wallets(profile.id).await?;
-        let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, state.jwt_secret.expose_secret())
-            .map_err(|e| AppError::Internal(e))?;
+        let token = jwt::create_token(
+            profile.id,
+            &profile.primary_address,
+            profile.token_version,
+            state.jwt_secret.expose_secret(),
+        )
+        .map_err(|e| AppError::Internal(e))?;
 
         let response = AuthResponse {
             token: token.clone(),
@@ -345,7 +353,10 @@ async fn connect_wallet(
                 .ok_or_else(|| AppError::NotFound("Profile not found".to_string()))?;
 
             let wallet_count = db.count_profile_wallets(profile.id).await?;
-            let label = body.label.clone().unwrap_or_else(|| format!("Wallet {}", wallet_count + 1));
+            let label = body
+                .label
+                .clone()
+                .unwrap_or_else(|| format!("Wallet {}", wallet_count + 1));
 
             db.add_wallet_to_profile(
                 profile.id,
@@ -356,9 +367,13 @@ async fn connect_wallet(
             .await?;
 
             let wallets = db.get_profile_wallets(profile.id).await?;
-            let token =
-                jwt::create_token(profile.id, &profile.primary_address, profile.token_version, state.jwt_secret.expose_secret())
-                    .map_err(|e| AppError::Internal(e))?;
+            let token = jwt::create_token(
+                profile.id,
+                &profile.primary_address,
+                profile.token_version,
+                state.jwt_secret.expose_secret(),
+            )
+            .map_err(|e| AppError::Internal(e))?;
 
             let response = AuthResponse {
                 token: token.clone(),
@@ -381,8 +396,13 @@ async fn connect_wallet(
     .await?;
 
     let wallets = db.get_profile_wallets(profile.id).await?;
-    let token = jwt::create_token(profile.id, &profile.primary_address, profile.token_version, state.jwt_secret.expose_secret())
-        .map_err(|e| AppError::Internal(e))?;
+    let token = jwt::create_token(
+        profile.id,
+        &profile.primary_address,
+        profile.token_version,
+        state.jwt_secret.expose_secret(),
+    )
+    .map_err(|e| AppError::Internal(e))?;
 
     let response = AuthResponse {
         token: token.clone(),
@@ -412,7 +432,6 @@ async fn remove_wallet(
     State(state): State<AppState>,
     Path(address): Path<String>,
 ) -> Result<Json<ProfileResponse>, AppError> {
-
     // remove_wallet_from_profile checks count internally and returns false if last wallet
     let removed = state
         .db
@@ -423,7 +442,9 @@ async fn remove_wallet(
         // Could be last wallet or wallet not found — check which
         let wallet_count = state.db.count_profile_wallets(profile.id).await?;
         if wallet_count <= 1 {
-            return Err(AppError::BadRequest("Cannot remove last wallet".to_string()));
+            return Err(AppError::BadRequest(
+                "Cannot remove last wallet".to_string(),
+            ));
         }
         return Err(AppError::NotFound("Wallet not found".to_string()));
     }
@@ -442,7 +463,6 @@ async fn update_wallet_label(
     Path(address): Path<String>,
     Json(body): Json<UpdateWalletLabelRequest>,
 ) -> Result<Json<ProfileResponse>, AppError> {
-
     // Validate the address format
     if !validate_bitcoin_address(&address, state.allowed_address_network) {
         return Err(AppError::BadRequest(format!(
@@ -486,7 +506,10 @@ async fn logout(
 
     // Always clear the cookie, even if token was missing/invalid
     let cookie = "bitmap_token=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0";
-    Ok(([(SET_COOKIE, cookie)], Json(serde_json::json!({"ok": true}))))
+    Ok((
+        [(SET_COOKIE, cookie)],
+        Json(serde_json::json!({"ok": true})),
+    ))
 }
 
 #[cfg(test)]
@@ -526,7 +549,10 @@ mod tests {
 
     #[test]
     fn garbage_input_rejected() {
-        assert!(!validate_bitcoin_address("not-an-address", Network::Bitcoin));
+        assert!(!validate_bitcoin_address(
+            "not-an-address",
+            Network::Bitcoin
+        ));
         assert!(!validate_bitcoin_address("", Network::Bitcoin));
         assert!(!validate_bitcoin_address("bc1", Network::Bitcoin));
     }
@@ -553,7 +579,10 @@ mod tests {
     #[test]
     fn extract_token_from_cookie() {
         let mut headers = HeaderMap::new();
-        headers.insert("Cookie", "bitmap_token=cookie-jwt; other=val".parse().unwrap());
+        headers.insert(
+            "Cookie",
+            "bitmap_token=cookie-jwt; other=val".parse().unwrap(),
+        );
         assert_eq!(extract_token(&headers), Some("cookie-jwt".to_string()));
     }
 
@@ -644,10 +673,16 @@ mod tests {
 
         assert!(cookie.contains("HttpOnly"), "missing HttpOnly");
         assert!(cookie.contains("Secure"), "missing Secure");
-        assert!(cookie.contains("SameSite=Strict"), "missing SameSite=Strict");
+        assert!(
+            cookie.contains("SameSite=Strict"),
+            "missing SameSite=Strict"
+        );
         assert!(cookie.contains("Path=/"), "missing Path=/");
         assert!(cookie.contains("Max-Age=2592000"), "missing Max-Age");
-        assert!(cookie.starts_with("bitmap_token=fake-token;"), "wrong cookie name/value");
+        assert!(
+            cookie.starts_with("bitmap_token=fake-token;"),
+            "wrong cookie name/value"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -686,7 +721,8 @@ mod tests {
                     .unwrap(),
             },
             ws_broadcaster: std::sync::Arc::new(crate::ws::WsBroadcaster::new()),
-            marketplace_keypair: crate::services::marketplace_keypair::MarketplaceKeypair::for_testing(),
+            marketplace_keypair:
+                crate::services::marketplace_keypair::MarketplaceKeypair::for_testing(),
             http_client: reqwest::Client::new(),
             ord_client: crate::services::ord::OrdClient::new(),
             render_api_base: "http://localhost".to_string(),
@@ -749,13 +785,9 @@ mod tests {
     #[tokio::test]
     async fn extractor_returns_401_for_jwt_signed_with_wrong_secret() {
         // Token is valid JWT structure but signed with a different secret
-        let token = crate::services::jwt::create_token(
-            uuid::Uuid::new_v4(),
-            "bc1qtest",
-            1,
-            "wrong-secret",
-        )
-        .unwrap();
+        let token =
+            crate::services::jwt::create_token(uuid::Uuid::new_v4(), "bc1qtest", 1, "wrong-secret")
+                .unwrap();
 
         let state = test_state_with_secret("correct-secret");
         let app = axum::Router::new()

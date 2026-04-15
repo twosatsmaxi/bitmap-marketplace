@@ -11,7 +11,12 @@ pub struct Claims {
     pub exp: usize,
 }
 
-pub fn create_token(profile_id: Uuid, primary_address: &str, token_version: i32, secret: &str) -> Result<String> {
+pub fn create_token(
+    profile_id: Uuid,
+    primary_address: &str,
+    token_version: i32,
+    secret: &str,
+) -> Result<String> {
     // 30 day expiry
     let exp = chrono::Utc::now()
         .checked_add_signed(chrono::Duration::days(30))
@@ -40,7 +45,7 @@ pub fn verify_token(token: &str, secret: &str) -> Result<Claims> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
     validation.validate_nbf = false;
-    
+
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),

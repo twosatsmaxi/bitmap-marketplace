@@ -23,38 +23,16 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{self, TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod db;
-pub mod errors;
-mod models;
-mod routes;
-mod services;
-pub mod ws;
-
-use crate::db::Database;
-use crate::services::marketplace_keypair::MarketplaceKeypair;
-use crate::services::ord::OrdClient;
+use bitmap_marketplace::db::Database;
+use bitmap_marketplace::services::marketplace_keypair::MarketplaceKeypair;
+use bitmap_marketplace::services::ord::OrdClient;
+use bitmap_marketplace::{routes, ws, AppState};
 
 /// Maximum number of pending auth challenges to store
 const MAX_CHALLENGES: u64 = 10_000;
 
 /// Challenge nonces expire after this duration
 const CHALLENGE_TTL: Duration = Duration::from_secs(10 * 60);
-
-#[derive(Clone)]
-pub struct AppState {
-    pub db: Database,
-    pub ws_broadcaster: Arc<ws::WsBroadcaster>,
-    pub marketplace_keypair: Arc<MarketplaceKeypair>,
-    pub http_client: reqwest::Client,
-    pub ord_client: OrdClient,
-    pub render_api_base: String,
-    pub network: Network,
-    pub allowed_address_network: Network,
-    pub jwt_secret: SecretString,
-    pub marketplace_fee_address: Option<String>,
-    pub marketplace_fee_bps: u64,
-    pub challenges: moka::future::Cache<String, routes::auth::Challenge>,
-}
 
 /// GET /health — unauthenticated, not rate-limited.
 /// Returns 200 if the database is reachable, 503 otherwise.
@@ -248,14 +226,8 @@ async fn main() -> Result<()> {
         .layer(CompressionLayer::new())
         .layer(
             TraceLayer::new_for_http()
-                .on_response(
-                    trace::DefaultOnResponse::new()
-                        .level(tracing::Level::DEBUG),
-                )
-                .on_request(
-                    trace::DefaultOnRequest::new()
-                        .level(tracing::Level::DEBUG),
-                ),
+                .on_response(trace::DefaultOnResponse::new().level(tracing::Level::DEBUG))
+                .on_request(trace::DefaultOnRequest::new().level(tracing::Level::DEBUG)),
         )
         .layer(axum::middleware::from_fn(log_rate_limited))
         .layer(PropagateRequestIdLayer::x_request_id())
@@ -350,10 +322,7 @@ fn build_cors_layer(frontend_url: Option<&str>) -> CorsLayer {
             Method::OPTIONS,
         ])
         .allow_headers([AUTHORIZATION, CONTENT_TYPE])
-        .expose_headers([
-            axum::http::header::ETAG,
-            axum::http::header::CACHE_CONTROL,
-        ])
+        .expose_headers([axum::http::header::ETAG, axum::http::header::CACHE_CONTROL])
         .max_age(Duration::from_secs(3600));
 
     if let Some(origin) = frontend_url {
@@ -365,7 +334,11 @@ fn build_cors_layer(frontend_url: Option<&str>) -> CorsLayer {
                 tracing::info!("CORS restricted to origin: {}", origin);
             }
             Err(e) => {
-                tracing::warn!("Invalid FRONTEND_URL '{}': {}. Allowing any origin.", origin, e);
+                tracing::warn!(
+                    "Invalid FRONTEND_URL '{}': {}. Allowing any origin.",
+                    origin,
+                    e
+                );
                 cors = cors.allow_origin(Any);
             }
         }
@@ -374,15 +347,15 @@ fn build_cors_layer(frontend_url: Option<&str>) -> CorsLayer {
         cors = cors.allow_origin(Any);
         tracing::warn!("FRONTEND_URL not set - CORS allowing any origin (development mode)");
     }
-    
+
     cors
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::routing::get;
     use axum::http::{Request, StatusCode};
+    use axum::routing::get;
     use tower::ServiceExt;
 
     fn test_app(cors: CorsLayer) -> Router {
@@ -459,7 +432,11 @@ mod tests {
     // CORS method and header restriction (changed from Any to explicit list)
     // -----------------------------------------------------------------------
 
-    fn preflight(app: Router, origin: &str, method: &str) -> impl std::future::Future<Output = axum::response::Response> {
+    fn preflight(
+        app: Router,
+        origin: &str,
+        method: &str,
+    ) -> impl std::future::Future<Output = axum::response::Response> {
         let req = Request::builder()
             .method("OPTIONS")
             .uri("/ping")
@@ -485,7 +462,10 @@ mod tests {
             .to_uppercase();
 
         for method in &["GET", "POST", "PUT", "PATCH", "DELETE"] {
-            assert!(methods.contains(method), "{method} missing from allowed methods; got: {methods}");
+            assert!(
+                methods.contains(method),
+                "{method} missing from allowed methods; got: {methods}"
+            );
         }
     }
 
@@ -498,7 +478,10 @@ mod tests {
             .uri("/ping")
             .header("Origin", "http://localhost:3001")
             .header("Access-Control-Request-Method", "POST")
-            .header("Access-Control-Request-Headers", "authorization, content-type")
+            .header(
+                "Access-Control-Request-Headers",
+                "authorization, content-type",
+            )
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -511,8 +494,14 @@ mod tests {
             .unwrap()
             .to_lowercase();
 
-        assert!(headers.contains("authorization"), "authorization missing; got: {headers}");
-        assert!(headers.contains("content-type"), "content-type missing; got: {headers}");
+        assert!(
+            headers.contains("authorization"),
+            "authorization missing; got: {headers}"
+        );
+        assert!(
+            headers.contains("content-type"),
+            "content-type missing; got: {headers}"
+        );
     }
 
     #[tokio::test]
@@ -575,7 +564,11 @@ mod tests {
 
         // UUID v4: 8-4-4-4-12 hex digits with dashes
         assert_eq!(id.len(), 36, "x-request-id should be a UUID; got: {id}");
-        assert_eq!(id.chars().filter(|&c| c == '-').count(), 4, "UUID must have 4 dashes; got: {id}");
+        assert_eq!(
+            id.chars().filter(|&c| c == '-').count(),
+            4,
+            "UUID must have 4 dashes; got: {id}"
+        );
     }
 
     #[tokio::test]
@@ -603,7 +596,10 @@ mod tests {
             .to_str()
             .unwrap();
 
-        assert_eq!(id, "my-request-id-123", "client-supplied request ID should be preserved");
+        assert_eq!(
+            id, "my-request-id-123",
+            "client-supplied request ID should be preserved"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -622,11 +618,18 @@ mod tests {
             .unwrap();
 
         let state = AppState {
-            db: crate::db::Database { pool },
-            ws_broadcaster: std::sync::Arc::new(crate::ws::WsBroadcaster::new()),
-            marketplace_keypair: crate::services::marketplace_keypair::MarketplaceKeypair::for_testing(),
+            db: bitmap_marketplace::db::Database { pool },
+            ws_broadcaster: std::sync::Arc::new(bitmap_marketplace::ws::WsBroadcaster::new()),
+            marketplace_keypair: {
+                std::env::set_var(
+                    "MARKETPLACE_SECRET_KEY",
+                    "0000000000000000000000000000000000000000000000000000000000000001",
+                );
+                bitmap_marketplace::services::marketplace_keypair::MarketplaceKeypair::from_env()
+                    .unwrap()
+            },
             http_client: reqwest::Client::new(),
-            ord_client: crate::services::ord::OrdClient::new(),
+            ord_client: bitmap_marketplace::services::ord::OrdClient::new(),
             render_api_base: "http://localhost".to_string(),
             network: bitcoin::Network::Regtest,
             allowed_address_network: bitcoin::Network::Bitcoin,
